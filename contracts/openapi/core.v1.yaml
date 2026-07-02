@@ -1,0 +1,403 @@
+openapi: 3.1.0
+info:
+  title: ESWMP Core API
+  version: v1
+  description: |
+    Scheduling primitives: Resources, Calendars, Availability Rules, Reservations,
+    and Appointments. This service owns scheduling and nothing else — it never
+    stores or returns any data belonging to the caller's own domain beyond the
+    opaque externalReferenceType/externalReferenceId pair. See docs/ESWMP_VISION.md
+    "Key rule".
+servers:
+  - url: http://localhost:6001
+    description: Local development
+security:
+  - BearerAuth: []
+
+paths:
+  /api/v1/resources:
+    post:
+      tags: [Resources]
+      summary: Register a Resource (a person, vehicle, room, or piece of equipment that can be scheduled)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateResourceRequest'
+      responses:
+        '201':
+          description: Resource created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Resource'
+    get:
+      tags: [Resources]
+      summary: List resources for the tenant
+      parameters:
+        - name: resourceType
+          in: query
+          schema: { type: string }
+        - name: status
+          in: query
+          schema: { $ref: '#/components/schemas/ResourceStatus' }
+      responses:
+        '200':
+          description: Paged resource list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PagedResourceResult'
+
+  /api/v1/resources/{id}:
+    get:
+      tags: [Resources]
+      summary: Get a single Resource
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Resource detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Resource'
+
+  /api/v1/availability-rules:
+    post:
+      tags: [Availability]
+      summary: Add a recurring availability rule for a Resource
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateAvailabilityRuleRequest'
+      responses:
+        '201':
+          description: Rule created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AvailabilityRule'
+
+  /api/v1/resources/{id}/availability:
+    get:
+      tags: [Availability]
+      summary: Get a Resource's availability windows for a date
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: date
+          in: query
+          required: true
+          schema: { type: string, format: date }
+      responses:
+        '200':
+          description: Availability windows for the date
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AvailabilityWindowsResponse'
+
+  /api/v1/slots/search:
+    post:
+      tags: [Slots]
+      summary: Search for bookable slots using the gap-elimination Slot Optimizer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SlotSearchRequest'
+      responses:
+        '200':
+          description: Candidate slots that do not create an unsellable gap
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SlotSearchResponse'
+
+  /api/v1/duration/estimate:
+    post:
+      tags: [Duration]
+      summary: Estimate reservation duration from tenant-configured size brackets and tag rules
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DurationEstimateRequest'
+      responses:
+        '200':
+          description: Estimated duration with any applicable safety alert
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DurationEstimateResponse'
+
+  /api/v1/reservations:
+    post:
+      tags: [Reservations]
+      summary: Create a temporary hold on a Resource for a time window
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateReservationRequest'
+      responses:
+        '201':
+          description: Reservation held
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Reservation'
+
+  /api/v1/reservations/{id}/confirm:
+    post:
+      tags: [Reservations]
+      summary: Confirm a held reservation (creates the Appointment)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Reservation confirmed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Reservation'
+
+  /api/v1/reservations/{id}/cancel:
+    post:
+      tags: [Reservations]
+      summary: Cancel a held or confirmed reservation
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Reservation cancelled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Reservation'
+
+  /api/v1/resources/{id}/calendar:
+    get:
+      tags: [Calendar]
+      summary: Get a Resource's confirmed appointments for a date range
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: from
+          in: query
+          required: true
+          schema: { type: string, format: date }
+        - name: to
+          in: query
+          required: true
+          schema: { type: string, format: date }
+      responses:
+        '200':
+          description: Calendar entries
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CalendarResponse'
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    ResourceStatus:
+      type: string
+      enum: [Active, Inactive, Suspended]
+
+    CreateResourceRequest:
+      type: object
+      required: [resourceType, name, timezone]
+      properties:
+        resourceType:
+          type: string
+          description: Caller-defined type label, e.g. "GroomingVan", "MeetingRoom", "DeliveryDriver"
+        name: { type: string }
+        timezone: { type: string, example: "America/Toronto" }
+        capacity: { type: integer, nullable: true }
+        skills:
+          type: array
+          items: { type: string }
+        location:
+          $ref: '#/components/schemas/GeoPoint'
+
+    Resource:
+      type: object
+      required: [id, tenantId, resourceType, name, timezone, status]
+      properties:
+        id: { type: string, format: uuid }
+        tenantId: { type: string, format: uuid }
+        resourceType: { type: string }
+        name: { type: string }
+        timezone: { type: string }
+        status: { $ref: '#/components/schemas/ResourceStatus' }
+        capacity: { type: integer, nullable: true }
+        skills:
+          type: array
+          items: { type: string }
+        location:
+          $ref: '#/components/schemas/GeoPoint'
+
+    GeoPoint:
+      type: object
+      nullable: true
+      properties:
+        latitude: { type: number, format: double }
+        longitude: { type: number, format: double }
+
+    PagedResourceResult:
+      type: object
+      required: [items, page, pageSize, totalCount]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Resource' }
+        page: { type: integer }
+        pageSize: { type: integer }
+        totalCount: { type: integer }
+
+    CreateAvailabilityRuleRequest:
+      type: object
+      required: [resourceId, dayOfWeek, startTime, endTime]
+      properties:
+        resourceId: { type: string, format: uuid }
+        dayOfWeek: { type: integer, minimum: 0, maximum: 6 }
+        startTime: { type: string, example: "08:00" }
+        endTime: { type: string, example: "18:00" }
+        effectiveFrom: { type: string, format: date, nullable: true }
+        effectiveTo: { type: string, format: date, nullable: true }
+
+    AvailabilityRule:
+      type: object
+      required: [id, resourceId, dayOfWeek, startTime, endTime]
+      properties:
+        id: { type: string, format: uuid }
+        resourceId: { type: string, format: uuid }
+        dayOfWeek: { type: integer }
+        startTime: { type: string }
+        endTime: { type: string }
+        effectiveFrom: { type: string, format: date, nullable: true }
+        effectiveTo: { type: string, format: date, nullable: true }
+
+    AvailabilityWindowsResponse:
+      type: object
+      required: [resourceId, date, windows]
+      properties:
+        resourceId: { type: string, format: uuid }
+        date: { type: string, format: date }
+        windows:
+          type: array
+          items:
+            type: object
+            properties:
+              start: { type: string, format: date-time }
+              end: { type: string, format: date-time }
+
+    SlotSearchRequest:
+      type: object
+      required: [resourceId, date, requestedDurationMinutes]
+      properties:
+        resourceId: { type: string, format: uuid }
+        date: { type: string, format: date }
+        requestedDurationMinutes: { type: integer }
+        minimumBookableDurationMinutes: { type: integer, default: 30 }
+
+    SlotSearchResponse:
+      type: object
+      required: [slots]
+      properties:
+        slots:
+          type: array
+          items: { type: string, format: date-time }
+
+    DurationEstimateRequest:
+      type: object
+      required: [resourceType, defaultBaseMinutes]
+      properties:
+        resourceType: { type: string }
+        defaultBaseMinutes: { type: integer }
+        sizeValue: { type: number, nullable: true, description: "Generic size metric — weight, sq ft, party size, etc." }
+        attributeTags:
+          type: array
+          items: { type: string }
+          description: Tenant-defined tags matched against DurationTagRule rows, e.g. "fragile", "high-priority"
+
+    DurationEstimateResponse:
+      type: object
+      required: [estimatedMinutes, baseMinutes, bufferMinutes, requiresSafetyAlert]
+      properties:
+        estimatedMinutes: { type: integer }
+        baseMinutes: { type: integer }
+        bufferMinutes: { type: integer }
+        safetyAlertReason: { type: string, nullable: true }
+        requiresSafetyAlert: { type: boolean }
+
+    CreateReservationRequest:
+      type: object
+      required: [resourceId, startTime, endTime, externalReferenceType, externalReferenceId]
+      properties:
+        resourceId: { type: string, format: uuid }
+        startTime: { type: string, format: date-time }
+        endTime: { type: string, format: date-time }
+        holdDurationMinutes: { type: integer, default: 15 }
+        externalReferenceType:
+          type: string
+          description: Opaque caller-domain type label, e.g. "booking". ESWMP never inspects this.
+        externalReferenceId:
+          type: string
+          description: Opaque caller-domain identifier, e.g. "BK-12345". ESWMP never inspects this.
+
+    Reservation:
+      type: object
+      required: [id, tenantId, resourceId, startTime, endTime, status, externalReferenceType, externalReferenceId]
+      properties:
+        id: { type: string, format: uuid }
+        tenantId: { type: string, format: uuid }
+        resourceId: { type: string, format: uuid }
+        startTime: { type: string, format: date-time }
+        endTime: { type: string, format: date-time }
+        status: { type: string, enum: [Held, Confirmed, Expired, Cancelled] }
+        expiresAt: { type: string, format: date-time, nullable: true }
+        externalReferenceType: { type: string }
+        externalReferenceId: { type: string }
+
+    CalendarResponse:
+      type: object
+      required: [resourceId, entries]
+      properties:
+        resourceId: { type: string, format: uuid }
+        entries:
+          type: array
+          items:
+            type: object
+            properties:
+              reservationId: { type: string, format: uuid }
+              start: { type: string, format: date-time }
+              end: { type: string, format: date-time }
+              status: { type: string }

@@ -1,0 +1,131 @@
+# ============================================================
+# ESWMP .gitignore — covers .NET, Node.js, Docker, Terraform
+# ============================================================
+
+# --- Secrets / Environment ---
+.env
+.env.local
+.env.*.local
+*.pfx
+*.p12
+*.pem
+*.key
+!*.example
+
+# --- .NET / C# ---
+[Bb]in/
+[Oo]bj/
+[Ll]og/
+[Ll]ogs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+*.userprefs
+.vs/
+_ReSharper*/
+*.resharper
+*.DotSettings.user
+[Tt]est[Rr]esult*/
+*.ncrunch*
+*.opensdf
+*.cache
+*.pidb
+*.svd
+*.pdb
+*.pgd
+*.ilk
+*.meta
+*.exp
+*.iobj
+*.ipdb
+*.aps
+*.ncb
+*.opendb
+*.origconfig
+*.VC.db
+*.VC.VC.opendb
+BenchmarkDotNet.Artifacts/
+project.lock.json
+project.fragment.lock.json
+artifacts/
+ScaffoldingReadMe.txt
+StyleCopReport.xml
+*.log
+*.vspscc
+*.vssscc
+.builds
+*.svclog
+*.scc
+
+# --- Node.js / Frontend (reserved for future frontend) ---
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.npm
+.eslintcache
+.stylelintcache
+*.tsbuildinfo
+.parcel-cache
+.cache
+dist/
+build/
+.vite/
+storybook-static/
+
+# --- Generated clients (auto-generated, never hand-edit) ---
+clients/generated/
+
+# --- Docker ---
+.docker/
+docker-compose.override.yml.local
+
+# --- Terraform ---
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+*.tfvars
+!terraform.tfvars.example
+
+# --- Azure ---
+.azure/
+azure.json
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# --- IDEs ---
+.vscode/settings.json
+.vscode/launch.json
+.vscode/tasks.json
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# --- Test output ---
+TestResults/
+coverage/
+*.coverage
+*.coveragexml
+lcov.info
+
+# --- Claude Code local settings ---
+.claude/settings.local.json

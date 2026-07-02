@@ -1,0 +1,197 @@
+networks:
+  eswmp-net:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  redis-data:
+  rabbitmq-data:
+
+services:
+
+  # ── Infrastructure ──────────────────────────────────────────
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: eswmp-postgres
+    environment:
+      POSTGRES_USER: eswmp
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: eswmp_core
+    ports:
+      - "6432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./infrastructure/postgres/init-databases.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - eswmp-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U eswmp -d eswmp_core"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  redis:
+    image: redis:7-alpine
+    container_name: eswmp-redis
+    ports:
+      - "6380:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - eswmp-net
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: eswmp-rabbitmq
+    ports:
+      - "6673:5672"
+      - "16673:15672"
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    networks:
+      - eswmp-net
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.57
+    container_name: eswmp-jaeger
+    ports:
+      - "17686:16686"
+      - "5317:4317"
+    networks:
+      - eswmp-net
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+
+  # ── API Gateway ──────────────────────────────────────────────
+
+  gateway:
+    build:
+      context: .
+      dockerfile: src/Eswmp.Gateway/Dockerfile
+    container_name: eswmp-gateway
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      Jwt__SecretKey: ${JWT_SECRET_KEY}
+      Jwt__Issuer: ${JWT_ISSUER}
+      Jwt__Audience: ${JWT_AUDIENCE}
+      ApplicationInsights__ConnectionString: ${APPLICATIONINSIGHTS_CONNECTION_STRING}
+      Otel__ServiceName: Eswmp.Gateway
+      Otel__Endpoint: http://jaeger:4317
+    ports:
+      - "6000:8080"
+    networks:
+      - eswmp-net
+    depends_on:
+      core:
+        condition: service_started
+      assignment:
+        condition: service_started
+      rules:
+        condition: service_started
+
+  # ── Backend Services ─────────────────────────────────────────
+
+  core:
+    build:
+      context: .
+      dockerfile: src/Eswmp.Core/Dockerfile
+    container_name: eswmp-core
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ConnectionStrings__Default: ${CORE_DB}
+      Redis__ConnectionString: ${REDIS_CONNECTION}
+      Jwt__SecretKey: ${JWT_SECRET_KEY}
+      Jwt__Issuer: ${JWT_ISSUER}
+      Jwt__Audience: ${JWT_AUDIENCE}
+      MessageBus__Transport: RabbitMQ
+      MessageBus__Host: rabbitmq
+      MessageBus__Port: 5672
+      MessageBus__Username: guest
+      MessageBus__Password: guest
+      Otel__ServiceName: Eswmp.Core
+      Otel__Endpoint: http://jaeger:4317
+      ApplicationInsights__ConnectionString: ${APPLICATIONINSIGHTS_CONNECTION_STRING}
+    ports:
+      - "6001:8080"
+    networks:
+      - eswmp-net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  assignment:
+    build:
+      context: .
+      dockerfile: src/Eswmp.Assignment/Dockerfile
+    container_name: eswmp-assignment
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ConnectionStrings__Default: ${ASSIGNMENT_DB}
+      Jwt__SecretKey: ${JWT_SECRET_KEY}
+      Jwt__Issuer: ${JWT_ISSUER}
+      Jwt__Audience: ${JWT_AUDIENCE}
+      MessageBus__Transport: RabbitMQ
+      MessageBus__Host: rabbitmq
+      MessageBus__Port: 5672
+      MessageBus__Username: guest
+      MessageBus__Password: guest
+      Otel__ServiceName: Eswmp.Assignment
+      Otel__Endpoint: http://jaeger:4317
+      ApplicationInsights__ConnectionString: ${APPLICATIONINSIGHTS_CONNECTION_STRING}
+    ports:
+      - "6002:8080"
+    networks:
+      - eswmp-net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  rules:
+    build:
+      context: .
+      dockerfile: src/Eswmp.Rules/Dockerfile
+    container_name: eswmp-rules
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ConnectionStrings__Default: ${RULES_DB}
+      Jwt__SecretKey: ${JWT_SECRET_KEY}
+      Jwt__Issuer: ${JWT_ISSUER}
+      Jwt__Audience: ${JWT_AUDIENCE}
+      MessageBus__Transport: RabbitMQ
+      MessageBus__Host: rabbitmq
+      MessageBus__Port: 5672
+      MessageBus__Username: guest
+      MessageBus__Password: guest
+      Otel__ServiceName: Eswmp.Rules
+      Otel__Endpoint: http://jaeger:4317
+      ApplicationInsights__ConnectionString: ${APPLICATIONINSIGHTS_CONNECTION_STRING}
+    ports:
+      - "6003:8080"
+    networks:
+      - eswmp-net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy

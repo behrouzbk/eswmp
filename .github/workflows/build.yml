@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+env:
+  DOTNET_VERSION: '9.0.x'
+
+jobs:
+  backend-build:
+    name: Backend Build & Test
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: eswmp
+          POSTGRES_PASSWORD: Eswmp_CI_2024!
+          POSTGRES_DB: eswmp_core
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U eswmp -d eswmp_core"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 12
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create CI databases
+        run: |
+          PGPASSWORD=Eswmp_CI_2024! psql -h localhost -U eswmp -d eswmp_core -c "CREATE DATABASE eswmp_assignment;"
+          PGPASSWORD=Eswmp_CI_2024! psql -h localhost -U eswmp -d eswmp_core -c "CREATE DATABASE eswmp_rules;"
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Restore
+        run: dotnet restore Eswmp.sln
+
+      - name: Build
+        run: dotnet build Eswmp.sln --no-restore -c Release
+
+      - name: Unit Tests
+        run: |
+          dotnet test tests/unit/Eswmp.Core.Tests/Eswmp.Core.Tests.csproj --no-build -c Release --logger "trx;LogFileName=core-unit.trx"
+          dotnet test tests/unit/Eswmp.Assignment.Tests/Eswmp.Assignment.Tests.csproj --no-build -c Release --logger "trx;LogFileName=assignment-unit.trx"
+
+      - name: Upload Test Results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results
+          path: "**/*.trx"
+
+  validate-openapi:
+    name: Validate OpenAPI Contracts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+
+      - name: Install spectral
+        run: npm install -g @stoplight/spectral-cli
+
+      - name: Lint contracts
+        run: spectral lint contracts/openapi/*.yaml --ruleset https://unpkg.com/@stoplight/spectral-openapi/dist/ruleset.js

@@ -1,0 +1,136 @@
+openapi: 3.1.0
+info:
+  title: ESWMP Rules API
+  version: v1
+  description: |
+    Tenant-configurable business rules and the reservation/appointment workflow
+    state machine (see docs/ESWMP_VISION.md "Workflow Engine" and "Rules Engine").
+    Rules are data, not code — a rule change should never require a redeploy.
+servers:
+  - url: http://localhost:6003
+    description: Local development
+security:
+  - BearerAuth: []
+
+paths:
+  /api/v1/rules:
+    post:
+      tags: [Rules]
+      summary: Create a tenant-configurable business rule
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateBusinessRuleRequest'
+      responses:
+        '201':
+          description: Rule created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BusinessRule'
+    get:
+      tags: [Rules]
+      summary: List active rules for the tenant
+      parameters:
+        - name: ruleType
+          in: query
+          schema: { type: string }
+      responses:
+        '200':
+          description: Rule list
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/BusinessRule' }
+
+  /api/v1/workflow/transitions/validate:
+    post:
+      tags: [Workflow]
+      summary: Validate whether a workflow state transition is legal
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ValidateTransitionRequest'
+      responses:
+        '200':
+          description: Transition validity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidateTransitionResponse'
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    WorkflowState:
+      type: string
+      description: The full reservation/appointment lifecycle (docs/ESWMP_VISION.md §9)
+      enum:
+        - Draft
+        - Requested
+        - Reserved
+        - PendingApproval
+        - Assigned
+        - Confirmed
+        - Travelling
+        - Arrived
+        - CheckedIn
+        - InProgress
+        - Completed
+        - Cancelled
+        - NoShow
+        - Rejected
+        - Expired
+
+    CreateBusinessRuleRequest:
+      type: object
+      required: [name, ruleType, definition]
+      properties:
+        name: { type: string }
+        ruleType:
+          type: string
+          description: e.g. "MaxDailyReservationsPerResource", "MinimumTravelBufferMinutes", "BlockedTimeWindow"
+        resourceType: { type: string, nullable: true }
+        definition:
+          type: object
+          description: Rule-type-specific parameters as a flat key/value bag
+          additionalProperties: true
+        isActive: { type: boolean, default: true }
+
+    BusinessRule:
+      type: object
+      required: [id, tenantId, name, ruleType, definition, isActive]
+      properties:
+        id: { type: string, format: uuid }
+        tenantId: { type: string, format: uuid }
+        name: { type: string }
+        ruleType: { type: string }
+        resourceType: { type: string, nullable: true }
+        definition:
+          type: object
+          additionalProperties: true
+        isActive: { type: boolean }
+
+    ValidateTransitionRequest:
+      type: object
+      required: [fromState, toState]
+      properties:
+        fromState: { $ref: '#/components/schemas/WorkflowState' }
+        toState: { $ref: '#/components/schemas/WorkflowState' }
+
+    ValidateTransitionResponse:
+      type: object
+      required: [isValid]
+      properties:
+        isValid: { type: boolean }
+        reason: { type: string, nullable: true }

@@ -1,0 +1,127 @@
+openapi: 3.1.0
+info:
+  title: ESWMP Assignment API
+  version: v1
+  description: |
+    Assignment is deliberately separate from Scheduling (see docs/ESWMP_VISION.md
+    "Assignment Engine"). Core reserves a slot; Assignment decides which Resource
+    of a given type best fulfills a Reservation, using a weighted score of
+    availability, proximity, specialisation, workload, and capacity fit.
+servers:
+  - url: http://localhost:6002
+    description: Local development
+security:
+  - BearerAuth: []
+
+paths:
+  /api/v1/assignments/score:
+    post:
+      tags: [Assignment]
+      summary: Rank candidate Resources for a Reservation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ScoreAssignmentRequest'
+      responses:
+        '200':
+          description: Ranked candidates, highest score first
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ScoreAssignmentResponse'
+
+  /api/v1/assignments:
+    post:
+      tags: [Assignment]
+      summary: Record an assignment decision (auto or manual) for audit
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateAssignmentLogRequest'
+      responses:
+        '201':
+          description: Assignment recorded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AssignmentLog'
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    AssignmentCandidate:
+      type: object
+      required: [resourceId]
+      properties:
+        resourceId: { type: string, format: uuid }
+        currentLatitude: { type: number, format: double, nullable: true }
+        currentLongitude: { type: number, format: double, nullable: true }
+        skills:
+          type: array
+          items: { type: string }
+        activeReservationCount: { type: integer, default: 0 }
+        averageCompletionMinutes: { type: number, nullable: true }
+
+    ScoreAssignmentRequest:
+      type: object
+      required: [reservationId, requiredSkills, candidates]
+      properties:
+        reservationId: { type: string, format: uuid }
+        targetLatitude: { type: number, format: double, nullable: true }
+        targetLongitude: { type: number, format: double, nullable: true }
+        requiredSkills:
+          type: array
+          items: { type: string }
+        estimatedDurationMinutes: { type: integer, nullable: true }
+        candidates:
+          type: array
+          items: { $ref: '#/components/schemas/AssignmentCandidate' }
+
+    ScoredCandidate:
+      type: object
+      required: [resourceId, score]
+      properties:
+        resourceId: { type: string, format: uuid }
+        score: { type: number, format: double }
+        distanceMetres: { type: number, format: double, nullable: true }
+        skillMatch: { type: boolean }
+        rationale: { type: string }
+
+    ScoreAssignmentResponse:
+      type: object
+      required: [reservationId, rankedCandidates]
+      properties:
+        reservationId: { type: string, format: uuid }
+        rankedCandidates:
+          type: array
+          items: { $ref: '#/components/schemas/ScoredCandidate' }
+
+    CreateAssignmentLogRequest:
+      type: object
+      required: [reservationId, resourceId, method]
+      properties:
+        reservationId: { type: string, format: uuid }
+        resourceId: { type: string, format: uuid }
+        method: { type: string, enum: [Auto, Manual] }
+        score: { type: number, format: double, nullable: true }
+
+    AssignmentLog:
+      type: object
+      required: [id, tenantId, reservationId, resourceId, method, assignedAt]
+      properties:
+        id: { type: string, format: uuid }
+        tenantId: { type: string, format: uuid }
+        reservationId: { type: string, format: uuid }
+        resourceId: { type: string, format: uuid }
+        method: { type: string }
+        score: { type: number, format: double, nullable: true }
+        assignedAt: { type: string, format: date-time }
