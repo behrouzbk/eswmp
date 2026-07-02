@@ -92,6 +92,11 @@ services:
       ApplicationInsights__ConnectionString: ${APPLICATIONINSIGHTS_CONNECTION_STRING}
       Otel__ServiceName: Eswmp.Gateway
       Otel__Endpoint: http://jaeger:4317
+      # appsettings.json defaults to localhost:600x for local `dotnet run` dev;
+      # inside the Docker network the gateway must reach services by container name.
+      ReverseProxy__Clusters__core__Destinations__primary__Address: http://core:8080
+      ReverseProxy__Clusters__assignment__Destinations__primary__Address: http://assignment:8080
+      ReverseProxy__Clusters__rules__Destinations__primary__Address: http://rules:8080
     ports:
       - "6000:8080"
     networks:

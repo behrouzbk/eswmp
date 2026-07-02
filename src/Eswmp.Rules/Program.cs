@@ -42,7 +42,8 @@ builder.Services.AddOpenApiDocument(config =>
     config.Version = "v1";
 });
 
-builder.Services.AddControllers();
+builder.Services.AddControllers()
+    .AddJsonOptions(options => options.JsonSerializerOptions.Converters.Add(new System.Text.Json.Serialization.JsonStringEnumConverter()));
 builder.Services.AddApplicationInsightsTelemetry();
 builder.Services.AddCors(options =>
     options.AddDefaultPolicy(policy =>

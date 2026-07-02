@@ -3,6 +3,8 @@ using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
+using System.Net.Http.Headers;
+using System.Text;
 
 namespace Eswmp.Shared.Extensions;
 
@@ -25,10 +27,33 @@ public static class HealthCheckExtensions
         var rabbitHost = configuration["MessageBus:Host"];
         if (!string.IsNullOrWhiteSpace(rabbitHost))
         {
-            builder.AddUrlGroup(
-                new Uri($"http://{rabbitHost}:15672/api/health/checks/alarms"),
-                name: "rabbitmq",
-                tags: ["ready"]);
+            var username = configuration["MessageBus:Username"] ?? "guest";
+            var password = configuration["MessageBus:Password"] ?? "guest";
+            var managementPort = configuration.GetValue<int>("MessageBus:ManagementPort", 15672);
+
+            // The RabbitMQ management API requires Basic Auth — AddUrlGroup sends no
+            // credentials by default, so a plain URL check always comes back 401.
+            builder.AddAsyncCheck("rabbitmq", async () =>
+            {
+                using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+                client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
+                    "Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes($"{username}:{password}")));
+
+                try
+                {
+                    var response = await client.GetAsync(
+                        $"http://{rabbitHost}:{managementPort}/api/health/checks/alarms");
+
+                    return response.IsSuccessStatusCode
+                        ? HealthCheckResult.Healthy()
+                        : HealthCheckResult.Unhealthy(
+                            $"RabbitMQ management API returned {(int)response.StatusCode}");
+                }
+                catch (Exception ex)
+                {
+                    return HealthCheckResult.Unhealthy("RabbitMQ unreachable", ex);
+                }
+            }, tags: ["ready"]);
         }
 
         return builder;
