@@ -127,5 +127,8 @@ coverage/
 *.coveragexml
 lcov.info
 
+# --- Docs (internal planning documents — never commit) ---
+docs/
+
 # --- Claude Code local settings ---
 .claude/settings.local.json
