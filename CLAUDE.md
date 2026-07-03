@@ -61,24 +61,55 @@ embeds it (PetZiv today, others later).
    PetZiv scheduling code worked — see `docs/ESWMP_VISION.md`.
 9. **Tests alongside every implementation.** Every prompt that generates a service
    or controller also generates the xUnit test class. No exceptions.
+10. **Keep the three tracking documents synchronized.** `docs/DEVELOPMENT_STATUS.md`,
+    `docs/TASK_BOARD.md`, and `docs/ESWMP_Project_Tracker.xlsx` together form the
+    single source of truth for development status — see "Tracking Document
+    Synchronization" below. Update all three whenever a task starts, progresses,
+    or completes. No exceptions.
+
+## Tracking Document Synchronization
+
+| Document                          | Role                                                                                                                                                         | Granularity                                                                                                                       |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------- |
+| `docs/DEVELOPMENT_STATUS.md`      | Narrative status + dated changelog, read by humans for "what's the state of things"                                                                          | Component-level (per service/area), plus a chronological changelog                                                                |
+| `docs/TASK_BOARD.md`              | Per-service task list with status symbols (✅ 🟡 🔴 🔵) and a summary scoreboard                                                                                 | Task-code level (`CO-*`, `AS-*`, `RU-*`, `GW-*`, `CC-*`)                                                                          |
+| `docs/ESWMP_Project_Tracker.xlsx` | Full PM tracker — `Task Tracker` sheet (dates, % complete, effort, risk), `Dashboard` sheet (live formulas over Task Tracker), `Legend & Instructions` sheet | Task-code level, superset of `TASK_BOARD.md` — also covers `ENV-*`, `SCF-*`, `GH-*` setup tasks not broken out in `TASK_BOARD.md` |
+
+Rule: when a task's status changes (started / in progress / blocked / completed),
+update all three in the same turn:
+
+1. `docs/TASK_BOARD.md` — flip the task's status symbol; update the Summary
+   Scoreboard counts if a task moved in/out of a category; bump "Last updated".
+2. `docs/DEVELOPMENT_STATUS.md` — update the relevant component status line
+   under "What has been built" / "What is NOT yet built", and add a dated
+   Changelog entry describing what changed; bump "Last updated".
+3. `docs/ESWMP_Project_Tracker.xlsx` — update the matching `Task Tracker` row's
+   `Status`, `% Complete`, and (if completed) `Actual Completion Date`; add a
+   note in `Notes / Comments` if there's a blocker or deviation. The `Dashboard`
+   sheet's counts are live formulas over `Task Tracker` and need no manual edit.
+
+If a task exists in one document but not another (e.g. a new `CO-*` item not
+yet in the xlsx), add it rather than skipping the update — the three documents
+must stay a consistent view of the same task set, not drift into separate
+lists.
 
 ## Service Quick Reference
 
-| Service | Port | DB Name | Csproj |
-|---|---|---|---|
-| Gateway | 6000 | N/A | `src/Eswmp.Gateway/Eswmp.Gateway.csproj` |
-| Core | 6001 | `eswmp_core` | `src/Eswmp.Core/Eswmp.Core.csproj` |
-| Assignment | 6002 | `eswmp_assignment` | `src/Eswmp.Assignment/Eswmp.Assignment.csproj` |
-| Rules | 6003 | `eswmp_rules` | `src/Eswmp.Rules/Eswmp.Rules.csproj` |
-| Shared library | N/A | N/A | `src/Eswmp.Shared/Eswmp.Shared.csproj` |
+| Service        | Port | DB Name            | Csproj                                         |
+| -------------- | ---- | ------------------ | ---------------------------------------------- |
+| Gateway        | 6100 | N/A                | `src/Eswmp.Gateway/Eswmp.Gateway.csproj`       |
+| Core           | 6001 | `eswmp_core`       | `src/Eswmp.Core/Eswmp.Core.csproj`             |
+| Assignment     | 6002 | `eswmp_assignment` | `src/Eswmp.Assignment/Eswmp.Assignment.csproj` |
+| Rules          | 6003 | `eswmp_rules`      | `src/Eswmp.Rules/Eswmp.Rules.csproj`           |
+| Shared library | N/A  | N/A                | `src/Eswmp.Shared/Eswmp.Shared.csproj`         |
 
 ## Key Entity Ownership
 
-| Entity | Service | DbContext |
-|---|---|---|
-| Tenant, Resource, Calendar, AvailabilityRule, AvailabilityException, Reservation, Appointment, DurationSizeBracket, DurationTagRule | Core | `CoreDbContext` |
-| AssignmentLog, AssignmentRule | Assignment | `AssignmentDbContext` |
-| BusinessRule, WorkflowTransitionLog | Rules | `RulesDbContext` |
+| Entity                                                                                                                              | Service    | DbContext             |
+| ----------------------------------------------------------------------------------------------------------------------------------- | ---------- | --------------------- |
+| Tenant, Resource, Calendar, AvailabilityRule, AvailabilityException, Reservation, Appointment, DurationSizeBracket, DurationTagRule | Core       | `CoreDbContext`       |
+| AssignmentLog, AssignmentRule                                                                                                       | Assignment | `AssignmentDbContext` |
+| BusinessRule, WorkflowTransitionLog                                                                                                 | Rules      | `RulesDbContext`      |
 
 ## Naming & Style Conventions
 
@@ -104,9 +135,17 @@ repo, not here.
 
 ## Phase Status
 
-| Phase | Focus | Status |
-|---|---|---|
+| Phase   | Focus                                                                                                                                                                     | Status        |
+| ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------- |
 | Phase 0 | Scaffold: Core/Assignment/Rules/Gateway skeletons, Resource/Reservation model, generalized Slot Optimizer + Duration Estimator, Assignment Scorer, Workflow state machine | 🟡 In Progress |
-| Phase 1 | Full Core CRUD + confirm/cancel reservation flow, first real tenant integration (PetZiv) | ⬜ Not Started |
-| Phase 2 | Rules engine hardening, workflow engine (approval steps), routing/geofencing | ⬜ Not Started |
-| Phase 3 | Multi-tenant licensing surface (API keys, usage metering, billing hooks) | ⬜ Not Started |
+| Phase 1 | Full Core CRUD + confirm/cancel reservation flow, first real tenant integration (PetZiv)                                                                                  | ⬜ Not Started |
+| Phase 2 | Rules engine hardening, workflow engine (approval steps), routing/geofencing                                                                                              | ⬜ Not Started |
+| Phase 3 | Multi-tenant licensing surface (API keys, usage metering, billing hooks)                                                                                                  | ⬜ Not Started |
+
+Whenever creating or updating Markdown tables:
+
+- Produce valid GitHub Flavored Markdown tables.
+- Align all columns with consistent spacing.
+- Ensure separator rows use at least three dashes.
+- Do not use tabs.
+- After modifying a table, reformat it so it is easy to read in Visual Studio Code.

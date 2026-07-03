@@ -25,7 +25,7 @@ PostgreSQL, contract-first OpenAPI, event-driven via MassTransit. Full detail in
 
 | Service | Port (local) | Owns |
 |---|---|---|
-| `Eswmp.Gateway` | 6000 | YARP reverse proxy, JWT validation, rate limiting |
+| `Eswmp.Gateway` | 6100 | YARP reverse proxy, JWT validation, rate limiting |
 | `Eswmp.Core` | 6001 | Resource, Calendar, AvailabilityRule, Reservation, Appointment — the scheduling primitives (Hassan's "Scheduling Service") |
 | `Eswmp.Assignment` | 6002 | Auto-assignment scoring — which Resource should fulfill a Reservation |
 | `Eswmp.Rules` | 6003 | Workflow state machine + tenant-configurable business rules |
@@ -54,7 +54,7 @@ docker compose up -d postgres redis rabbitmq jaeger
 dotnet run --project src\Eswmp.Core          # http://localhost:6001/swagger
 dotnet run --project src\Eswmp.Assignment    # http://localhost:6002/swagger
 dotnet run --project src\Eswmp.Rules         # http://localhost:6003/swagger
-dotnet run --project src\Eswmp.Gateway       # http://localhost:6000
+dotnet run --project src\Eswmp.Gateway       # http://localhost:6100
 
 # 4. Run tests
 dotnet test Eswmp.sln

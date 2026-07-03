@@ -98,7 +98,8 @@ services:
       ReverseProxy__Clusters__assignment__Destinations__primary__Address: http://assignment:8080
       ReverseProxy__Clusters__rules__Destinations__primary__Address: http://rules:8080
     ports:
-      - "6000:8080"
+      # 6100, not 6000 — 6000 is Chrome/Firefox's blocked "unsafe port" (X11), browsers refuse to load it.
+      - "6100:8080"
     networks:
       - eswmp-net
     depends_on:
