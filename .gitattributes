@@ -1,0 +1,15 @@
+# Normalize line endings to LF in the repo; let git handle checkout conversion per-platform.
+* text=auto eol=lf
+
+*.cs text
+*.csproj text
+*.sln text eol=crlf
+*.json text
+*.yaml text
+*.yml text
+*.md text
+
+*.jpg binary
+*.jpeg binary
+*.png binary
+*.gif binary
