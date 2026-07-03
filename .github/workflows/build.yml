@@ -76,4 +76,4 @@ jobs:
         run: npm install -g @stoplight/spectral-cli
 
       - name: Lint contracts
-        run: spectral lint contracts/openapi/*.yaml --ruleset https://unpkg.com/@stoplight/spectral-openapi/dist/ruleset.js
+        run: spectral lint contracts/openapi/*.yaml --ruleset .spectral.yaml
