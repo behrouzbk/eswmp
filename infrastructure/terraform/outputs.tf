@@ -33,3 +33,13 @@ output "application_insights_connection_string" {
 output "key_vault_uri" {
   value = azurerm_key_vault.kv.vault_uri
 }
+
+output "servicebus_connection_string" {
+  value     = azurerm_servicebus_namespace_authorization_rule.sb_manage.primary_connection_string
+  sensitive = true
+}
+
+output "gateway_url" {
+  description = "Public HTTPS URL of the Gateway — the only externally reachable service"
+  value       = "https://${azurerm_container_app.services["gateway"].latest_revision_fqdn}"
+}

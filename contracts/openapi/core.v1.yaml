@@ -67,6 +67,258 @@ paths:
               schema:
                 $ref: '#/components/schemas/Resource'
 
+  /api/v1/resources/{id}/activate:
+    post:
+      tags: [Resources]
+      summary: Activate a Resource (Draft/PendingVerification/Inactive -> Active)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ResourceLifecycleRequest' }
+      responses:
+        '200': { description: Resource activated, content: { application/json: { schema: { $ref: '#/components/schemas/Resource' } } } }
+        '409': { description: Invalid transition from current status }
+        '412': { description: expectedVersion did not match current Version }
+
+  /api/v1/resources/{id}/suspend:
+    post:
+      tags: [Resources]
+      summary: Suspend an Active Resource
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ResourceLifecycleRequest' }
+      responses:
+        '200': { description: Resource suspended, content: { application/json: { schema: { $ref: '#/components/schemas/Resource' } } } }
+        '409': { description: Invalid transition from current status }
+        '412': { description: expectedVersion did not match current Version }
+
+  /api/v1/resources/{id}/reactivate:
+    post:
+      tags: [Resources]
+      summary: Reactivate a Suspended Resource
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ResourceLifecycleRequest' }
+      responses:
+        '200': { description: Resource reactivated, content: { application/json: { schema: { $ref: '#/components/schemas/Resource' } } } }
+        '409': { description: Invalid transition from current status }
+        '412': { description: expectedVersion did not match current Version }
+
+  /api/v1/resources/{id}/deactivate:
+    post:
+      tags: [Resources]
+      summary: Deactivate an Active or Suspended Resource
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ResourceLifecycleRequest' }
+      responses:
+        '200': { description: Resource deactivated, content: { application/json: { schema: { $ref: '#/components/schemas/Resource' } } } }
+        '409': { description: Invalid transition from current status }
+        '412': { description: expectedVersion did not match current Version }
+
+  /api/v1/resources/{id}/retire:
+    post:
+      tags: [Resources]
+      summary: Retire a Resource permanently (terminal state)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ResourceLifecycleRequest' }
+      responses:
+        '200': { description: Resource retired, content: { application/json: { schema: { $ref: '#/components/schemas/Resource' } } } }
+        '409': { description: Invalid transition from current status }
+        '412': { description: expectedVersion did not match current Version }
+
+  /api/v1/resources/{id}/capabilities:
+    post:
+      tags: [Resources]
+      summary: Grant a capability to a Resource
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AddResourceCapabilityRequest' }
+      responses:
+        '201': { description: Capability added, content: { application/json: { schema: { $ref: '#/components/schemas/ResourceCapability' } } } }
+
+  /api/v1/resources/{id}/skills:
+    post:
+      tags: [Resources]
+      summary: Add a skill to a Resource
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AddResourceSkillRequest' }
+      responses:
+        '201': { description: Skill added, content: { application/json: { schema: { $ref: '#/components/schemas/ResourceSkill' } } } }
+
+  /api/v1/resources/{id}/certifications:
+    post:
+      tags: [Resources]
+      summary: Add a certification to a Resource
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AddResourceCertificationRequest' }
+      responses:
+        '201': { description: Certification added, content: { application/json: { schema: { $ref: '#/components/schemas/ResourceCertification' } } } }
+
+  /api/v1/capacity/profiles:
+    post:
+      tags: [Capacity]
+      summary: Create a Capacity profile for a Resource
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateCapacityProfileRequest' }
+      responses:
+        '201': { description: Profile created, content: { application/json: { schema: { $ref: '#/components/schemas/CapacityProfile' } } } }
+
+  /api/v1/capacity/profiles/{id}:
+    get:
+      tags: [Capacity]
+      summary: Get a Capacity profile
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200': { description: Profile detail, content: { application/json: { schema: { $ref: '#/components/schemas/CapacityProfile' } } } }
+        '404': { description: Not found }
+
+  /api/v1/capacity/profiles/{id}/definitions:
+    post:
+      tags: [Capacity]
+      summary: Add a Capacity definition (one measurable dimension) to a profile
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateCapacityDefinitionRequest' }
+      responses:
+        '201': { description: Definition created, content: { application/json: { schema: { $ref: '#/components/schemas/CapacityDefinition' } } } }
+        '404': { description: Profile not found }
+
+  /api/v1/capacity/definitions/{id}:
+    patch:
+      tags: [Capacity]
+      summary: Update a Capacity definition
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateCapacityDefinitionRequest' }
+      responses:
+        '200': { description: Definition updated, content: { application/json: { schema: { $ref: '#/components/schemas/CapacityDefinition' } } } }
+        '404': { description: Not found }
+
+  /api/v1/capacity/resolve:
+    post:
+      tags: [Capacity]
+      summary: Compute effective/held/consumed/remaining capacity for a Resource dimension over a window
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ResolveCapacityRequest' }
+      responses:
+        '200': { description: Resolved capacity, content: { application/json: { schema: { $ref: '#/components/schemas/ResolveCapacityResponse' } } } }
+        '404': { description: No active definition for the resource/dimension }
+
+  /api/v1/capacity/explain:
+    post:
+      tags: [Capacity]
+      summary: Breakdown of how a capacity resolution was computed (defined/effective/held/consumed/remaining)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ResolveCapacityRequest' }
+      responses:
+        '200': { description: Capacity explanation, content: { application/json: { schema: { $ref: '#/components/schemas/ExplainCapacityResponse' } } } }
+        '404': { description: No active definition for the resource/dimension }
+
+  /api/v1/capacity/holds:
+    post:
+      tags: [Capacity]
+      summary: Atomically acquire a capacity hold (fails with 409 if it would exceed remaining capacity)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateCapacityHoldRequest' }
+      responses:
+        '201': { description: Hold acquired, content: { application/json: { schema: { $ref: '#/components/schemas/CapacityHold' } } } }
+        '200': { description: Duplicate request replayed by IdempotencyKey — original hold returned unchanged }
+        '404': { description: No active definition for the resource/dimension }
+        '409': { description: Requested quantity exceeds remaining capacity }
+
+  /api/v1/capacity/holds/{id}:
+    get:
+      tags: [Capacity]
+      summary: Get a Capacity hold
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200': { description: Hold detail, content: { application/json: { schema: { $ref: '#/components/schemas/CapacityHold' } } } }
+        '404': { description: Not found }
+
+  /api/v1/capacity/holds/{id}/commit:
+    post:
+      tags: [Capacity]
+      summary: Convert an active Hold into a durable Consumption record
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200': { description: Hold committed, content: { application/json: { schema: { $ref: '#/components/schemas/CapacityConsumption' } } } }
+        '404': { description: Not found }
+        '409': { description: Hold is not Active }
+
+  /api/v1/capacity/holds/{id}/release:
+    post:
+      tags: [Capacity]
+      summary: Release an active Hold without consuming capacity
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200': { description: Hold released, content: { application/json: { schema: { $ref: '#/components/schemas/CapacityHold' } } } }
+        '404': { description: Not found }
+        '409': { description: Hold is not Active }
+
+  /api/v1/capacity/consumptions/{id}/release:
+    post:
+      tags: [Capacity]
+      summary: Release a committed Consumption, freeing its capacity back
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200': { description: Consumption released, content: { application/json: { schema: { $ref: '#/components/schemas/CapacityConsumption' } } } }
+        '404': { description: Not found }
+        '409': { description: Consumption is not Committed }
+
   /api/v1/availability-rules:
     post:
       tags: [Availability]
@@ -105,6 +357,94 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/AvailabilityWindowsResponse'
+
+  /api/v1/resources/{id}/time-off-requests:
+    post:
+      tags: [Availability]
+      summary: Request time off for a Resource
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateTimeOffRequest' }
+      responses:
+        '201': { description: Time off requested (PendingApproval), content: { application/json: { schema: { $ref: '#/components/schemas/TimeOff' } } } }
+
+  /api/v1/time-off-requests/{id}/approve:
+    post:
+      tags: [Availability]
+      summary: Approve a pending time off request
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200': { description: Approved, content: { application/json: { schema: { $ref: '#/components/schemas/TimeOff' } } } }
+        '409': { description: Not in PendingApproval }
+
+  /api/v1/time-off-requests/{id}/reject:
+    post:
+      tags: [Availability]
+      summary: Reject a pending time off request
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200': { description: Rejected, content: { application/json: { schema: { $ref: '#/components/schemas/TimeOff' } } } }
+        '409': { description: Not in PendingApproval }
+
+  /api/v1/time-off-requests/{id}/cancel:
+    post:
+      tags: [Availability]
+      summary: Cancel a pending or approved time off request
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200': { description: Cancelled, content: { application/json: { schema: { $ref: '#/components/schemas/TimeOff' } } } }
+        '409': { description: Not in PendingApproval or Approved }
+
+  /api/v1/resources/{id}/availability-overrides:
+    post:
+      tags: [Availability]
+      summary: Force-available or force-unavailable override for a Resource over a window
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateAvailabilityOverrideRequest' }
+      responses:
+        '201': { description: Override created, content: { application/json: { schema: { $ref: '#/components/schemas/AvailabilityOverride' } } } }
+
+  /api/v1/availability/resolve:
+    post:
+      tags: [Availability]
+      summary: Resolve a Resource's free intervals over an arbitrary window, applying the full rule/exception/time-off/override priority stack
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ResolveAvailabilityRequest' }
+      responses:
+        '200': { description: Free intervals, content: { application/json: { schema: { $ref: '#/components/schemas/ResolveAvailabilityResponse' } } } }
+
+  /api/v1/availability/batch-resolve:
+    post:
+      tags: [Availability]
+      summary: Resolve free intervals for several Resources at once
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BatchResolveAvailabilityRequest' }
+      responses:
+        '200':
+          description: Free intervals per resource
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ResolveAvailabilityResponse' }
 
   /api/v1/slots/search:
     post:
@@ -159,6 +499,14 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Reservation'
+        '409':
+          description: The Resource already has an overlapping Held or Confirmed reservation for the requested time window
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error: { type: string }
 
   /api/v1/reservations/{id}/confirm:
     post:
@@ -229,7 +577,14 @@ components:
   schemas:
     ResourceStatus:
       type: string
-      enum: [Active, Inactive, Suspended]
+      description: >-
+        Expanded from the original 3-state (Active/Inactive/Suspended) enum to a
+        full onboarding-through-retirement lifecycle.
+      enum: [Draft, PendingVerification, Active, Suspended, Inactive, Retired]
+
+    VerificationStatus:
+      type: string
+      enum: [NotRequired, NotStarted, Pending, Verified, Rejected, Expired]
 
     CreateResourceRequest:
       type: object
@@ -244,25 +599,97 @@ components:
         skills:
           type: array
           items: { type: string }
-        location:
-          $ref: '#/components/schemas/GeoPoint'
+        locationLatitude: { type: number, format: double, nullable: true }
+        locationLongitude: { type: number, format: double, nullable: true }
 
     Resource:
       type: object
-      required: [id, tenantId, resourceType, name, timezone, status]
+      required: [id, tenantId, resourceType, name, timezone, status, verificationStatus, version]
       properties:
         id: { type: string, format: uuid }
         tenantId: { type: string, format: uuid }
         resourceType: { type: string }
+        resourceTypeId: { type: string, format: uuid, nullable: true, description: "Optional link to a tenant-defined ResourceType row." }
         name: { type: string }
         timezone: { type: string }
         status: { $ref: '#/components/schemas/ResourceStatus' }
+        verificationStatus: { $ref: '#/components/schemas/VerificationStatus' }
+        version: { type: integer, description: "Optimistic-concurrency token for lifecycle transitions." }
         capacity: { type: integer, nullable: true }
         skills:
           type: array
           items: { type: string }
         location:
           $ref: '#/components/schemas/GeoPoint'
+
+    ResourceLifecycleRequest:
+      type: object
+      properties:
+        reasonCode: { type: string, nullable: true }
+        comment: { type: string, nullable: true }
+        expectedVersion: { type: integer, nullable: true, description: "If supplied and it doesn't match the Resource's current version, returns 412." }
+
+    AddResourceCapabilityRequest:
+      type: object
+      required: [capabilityCode, level]
+      properties:
+        capabilityCode: { type: string, example: "HEAVY_LIFTING" }
+        level: { type: integer, minimum: 1, maximum: 4, default: 1 }
+        effectiveFrom: { type: string, format: date, nullable: true }
+        effectiveTo: { type: string, format: date, nullable: true }
+
+    ResourceCapability:
+      type: object
+      required: [id, resourceId, capabilityCode, level, status]
+      properties:
+        id: { type: string, format: uuid }
+        resourceId: { type: string, format: uuid }
+        capabilityCode: { type: string }
+        level: { type: integer }
+        status: { type: string, enum: [Pending, Active, Suspended, Expired, Revoked] }
+        effectiveFrom: { type: string, format: date, nullable: true }
+        effectiveTo: { type: string, format: date, nullable: true }
+
+    AddResourceSkillRequest:
+      type: object
+      required: [skillCode, level]
+      properties:
+        skillCode: { type: string }
+        level: { type: integer, minimum: 1, default: 1 }
+        yearsOfExperience: { type: number, nullable: true }
+        verified: { type: boolean, default: false }
+
+    ResourceSkill:
+      type: object
+      required: [id, resourceId, skillCode, level, verified]
+      properties:
+        id: { type: string, format: uuid }
+        resourceId: { type: string, format: uuid }
+        skillCode: { type: string }
+        level: { type: integer }
+        yearsOfExperience: { type: number, nullable: true }
+        verified: { type: boolean }
+
+    AddResourceCertificationRequest:
+      type: object
+      required: [certificationTypeCode]
+      properties:
+        certificationTypeCode: { type: string }
+        credentialReference: { type: string, nullable: true }
+        issuedAt: { type: string, format: date, nullable: true }
+        expiresAt: { type: string, format: date, nullable: true }
+
+    ResourceCertification:
+      type: object
+      required: [id, resourceId, certificationTypeCode, status]
+      properties:
+        id: { type: string, format: uuid }
+        resourceId: { type: string, format: uuid }
+        certificationTypeCode: { type: string }
+        credentialReference: { type: string, nullable: true }
+        issuedAt: { type: string, format: date, nullable: true }
+        expiresAt: { type: string, format: date, nullable: true }
+        status: { type: string, enum: [Submitted, PendingVerification, Valid, Rejected, Expired, Revoked] }
 
     GeoPoint:
       type: object
@@ -295,15 +722,246 @@ components:
 
     AvailabilityRule:
       type: object
-      required: [id, resourceId, dayOfWeek, startTime, endTime]
+      required: [id, resourceId, dayOfWeek, startTime, endTime, ruleType, priority, status]
       properties:
         id: { type: string, format: uuid }
         resourceId: { type: string, format: uuid }
+        availabilityProfileId: { type: string, format: uuid, nullable: true }
         dayOfWeek: { type: integer }
         startTime: { type: string }
         endTime: { type: string }
         effectiveFrom: { type: string, format: date, nullable: true }
         effectiveTo: { type: string, format: date, nullable: true }
+        ruleType: { type: string, enum: [RegularWorkingHours, Shift, SeasonalSchedule, TemporarySchedule, AdditionalAvailability] }
+        recurrencePattern:
+          type: string
+          nullable: true
+          description: >-
+            JSON-encoded { frequency: Daily|Weekly|SelectedWeekdays, interval, daysOfWeek[] }.
+            Optional — when absent, dayOfWeek/startTime/endTime are authoritative.
+        priority: { type: integer }
+        status: { type: string, enum: [Active, Retired] }
+        source: { type: string, nullable: true }
+
+    AvailabilityProfile:
+      type: object
+      required: [id, resourceId, name, timezone, status, availabilityVersion]
+      properties:
+        id: { type: string, format: uuid }
+        resourceId: { type: string, format: uuid }
+        name: { type: string }
+        timezone: { type: string }
+        status: { type: string, enum: [Draft, Active, Suspended, Retired] }
+        availabilityVersion: { type: integer, description: "Bumped on every material change; usable as a cache-invalidation signal." }
+
+    CreateTimeOffRequest:
+      type: object
+      required: [type, startTime, endTime]
+      properties:
+        type: { type: string, example: "Vacation" }
+        startTime: { type: string, format: date-time }
+        endTime: { type: string, format: date-time }
+        reasonCode: { type: string, nullable: true }
+
+    TimeOff:
+      type: object
+      required: [id, resourceId, type, startTime, endTime, approvalStatus]
+      properties:
+        id: { type: string, format: uuid }
+        resourceId: { type: string, format: uuid }
+        type: { type: string }
+        startTime: { type: string, format: date-time }
+        endTime: { type: string, format: date-time }
+        reasonCode: { type: string, nullable: true }
+        approvalStatus: { type: string, enum: [Draft, PendingApproval, Approved, Rejected, Cancelled] }
+
+    CreateAvailabilityOverrideRequest:
+      type: object
+      required: [effect, startTime, endTime]
+      properties:
+        effect: { type: string, enum: [ForceAvailable, ForceUnavailable] }
+        startTime: { type: string, format: date-time }
+        endTime: { type: string, format: date-time }
+        reasonCode: { type: string, nullable: true }
+
+    AvailabilityOverride:
+      type: object
+      required: [id, resourceId, effect, startTime, endTime, status]
+      properties:
+        id: { type: string, format: uuid }
+        resourceId: { type: string, format: uuid }
+        effect: { type: string, enum: [ForceAvailable, ForceUnavailable] }
+        startTime: { type: string, format: date-time }
+        endTime: { type: string, format: date-time }
+        reasonCode: { type: string, nullable: true }
+        status: { type: string, enum: [Active, Retired] }
+
+    ResolveAvailabilityRequest:
+      type: object
+      required: [resourceId, startTime, endTime]
+      properties:
+        resourceId: { type: string, format: uuid }
+        startTime: { type: string, format: date-time }
+        endTime: { type: string, format: date-time }
+
+    ResolveAvailabilityResponse:
+      type: object
+      required: [resourceId, freeIntervals]
+      properties:
+        resourceId: { type: string, format: uuid }
+        freeIntervals:
+          type: array
+          items:
+            type: object
+            properties:
+              start: { type: string, format: date-time }
+              end: { type: string, format: date-time }
+
+    BatchResolveAvailabilityRequest:
+      type: object
+      required: [resourceIds, startTime, endTime]
+      properties:
+        resourceIds:
+          type: array
+          items: { type: string, format: uuid }
+        startTime: { type: string, format: date-time }
+        endTime: { type: string, format: date-time }
+
+    CreateCapacityProfileRequest:
+      type: object
+      required: [resourceId, name, timezone]
+      properties:
+        resourceId: { type: string, format: uuid }
+        name: { type: string }
+        timezone: { type: string }
+
+    CapacityProfile:
+      type: object
+      required: [id, resourceId, name, timezone, status, version]
+      properties:
+        id: { type: string, format: uuid }
+        resourceId: { type: string, format: uuid }
+        name: { type: string }
+        timezone: { type: string }
+        status: { type: string, enum: [Draft, Active, Suspended, Retired] }
+        version: { type: integer }
+
+    CreateCapacityDefinitionRequest:
+      type: object
+      required: [name, capacityModel, dimensionCode, maximumQuantity, unit, timeBasis]
+      properties:
+        name: { type: string }
+        capacityModel: { type: string, enum: [Exclusive, Concurrent, Quantity, TimeBucket, DailyQuota] }
+        dimensionCode: { type: string, example: "CONCURRENT_WORK" }
+        maximumQuantity: { type: integer }
+        unit: { type: string, enum: [Count, Kg, Litre, Minute, Hour, CubicMetre] }
+        timeBasis: { type: string, enum: [Concurrent, PerBucket, PerDay, PerWeek] }
+        effectiveFrom: { type: string, format: date, nullable: true }
+        effectiveTo: { type: string, format: date, nullable: true }
+
+    UpdateCapacityDefinitionRequest:
+      type: object
+      properties:
+        name: { type: string, nullable: true }
+        maximumQuantity: { type: integer, nullable: true }
+        status: { type: string, enum: [Draft, Active, Suspended, Retired], nullable: true }
+        effectiveFrom: { type: string, format: date, nullable: true }
+        effectiveTo: { type: string, format: date, nullable: true }
+
+    CapacityDefinition:
+      type: object
+      required: [id, capacityProfileId, name, capacityModel, dimensionCode, maximumQuantity, unit, timeBasis, status, version]
+      properties:
+        id: { type: string, format: uuid }
+        capacityProfileId: { type: string, format: uuid }
+        name: { type: string }
+        capacityModel: { type: string, enum: [Exclusive, Concurrent, Quantity, TimeBucket, DailyQuota] }
+        dimensionCode: { type: string }
+        maximumQuantity: { type: integer }
+        unit: { type: string, enum: [Count, Kg, Litre, Minute, Hour, CubicMetre] }
+        timeBasis: { type: string, enum: [Concurrent, PerBucket, PerDay, PerWeek] }
+        effectiveFrom: { type: string, format: date, nullable: true }
+        effectiveTo: { type: string, format: date, nullable: true }
+        status: { type: string, enum: [Draft, Active, Suspended, Retired] }
+        version: { type: integer }
+
+    ResolveCapacityRequest:
+      type: object
+      required: [resourceId, dimensionCode, startTime, endTime, requiredQuantity]
+      properties:
+        resourceId: { type: string, format: uuid }
+        dimensionCode: { type: string }
+        startTime: { type: string, format: date-time }
+        endTime: { type: string, format: date-time }
+        requiredQuantity: { type: integer }
+
+    ResolveCapacityResponse:
+      type: object
+      required: [effectiveCapacity, consumedCapacity, heldCapacity, remainingCapacity, canFulfil]
+      properties:
+        effectiveCapacity: { type: integer }
+        consumedCapacity: { type: integer }
+        heldCapacity: { type: integer }
+        remainingCapacity: { type: integer }
+        canFulfil: { type: boolean }
+
+    ExplainCapacityResponse:
+      type: object
+      required: [definedCapacity, effectiveCapacity, activeHolds, confirmedConsumption, remainingCapacity]
+      properties:
+        definedCapacity: { type: integer }
+        effectiveCapacity: { type: integer }
+        activeHolds: { type: integer }
+        confirmedConsumption: { type: integer }
+        remainingCapacity: { type: integer }
+
+    CreateCapacityHoldRequest:
+      type: object
+      required: [resourceId, dimensionCode, quantity, startTime, endTime, holdDurationSeconds, idempotencyKey]
+      properties:
+        resourceId: { type: string, format: uuid }
+        dimensionCode: { type: string }
+        quantity: { type: integer }
+        startTime: { type: string, format: date-time }
+        endTime: { type: string, format: date-time }
+        holdDurationSeconds: { type: integer, default: 60 }
+        sourceType: { type: string, nullable: true, description: "Opaque caller-domain pointer, never inspected." }
+        sourceId: { type: string, nullable: true }
+        idempotencyKey: { type: string }
+
+    CapacityHold:
+      type: object
+      required: [id, capacityDefinitionId, resourceId, dimensionCode, quantity, startTime, endTime, status, expiresAt, idempotencyKey, version]
+      properties:
+        id: { type: string, format: uuid }
+        capacityDefinitionId: { type: string, format: uuid }
+        resourceId: { type: string, format: uuid }
+        dimensionCode: { type: string }
+        quantity: { type: integer }
+        startTime: { type: string, format: date-time }
+        endTime: { type: string, format: date-time }
+        status: { type: string, enum: [Active, Committed, Released, Expired, Cancelled] }
+        expiresAt: { type: string, format: date-time }
+        idempotencyKey: { type: string }
+        sourceType: { type: string, nullable: true }
+        sourceId: { type: string, nullable: true }
+        version: { type: integer }
+
+    CapacityConsumption:
+      type: object
+      required: [id, capacityDefinitionId, resourceId, dimensionCode, quantity, startTime, endTime, status, version]
+      properties:
+        id: { type: string, format: uuid }
+        capacityDefinitionId: { type: string, format: uuid }
+        resourceId: { type: string, format: uuid }
+        dimensionCode: { type: string }
+        quantity: { type: integer }
+        startTime: { type: string, format: date-time }
+        endTime: { type: string, format: date-time }
+        sourceType: { type: string, nullable: true }
+        sourceId: { type: string, nullable: true }
+        status: { type: string, enum: [Committed, Released] }
+        version: { type: integer }
 
     AvailabilityWindowsResponse:
       type: object

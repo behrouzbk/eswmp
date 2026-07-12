@@ -56,3 +56,16 @@ services:
       MessageBus__Password: guest
       Otel__ServiceName: Eswmp.Rules
       Otel__Endpoint: http://jaeger:4317
+
+  work:
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_URLS: http://+:8080
+      ConnectionStrings__Default: ${WORK_DB:-Host=postgres;Port=5432;Database=eswmp_work;Username=eswmp;Password=YourStrong@Passw0rd}
+      MessageBus__Transport: RabbitMQ
+      MessageBus__Host: rabbitmq
+      MessageBus__Port: 5672
+      MessageBus__Username: guest
+      MessageBus__Password: guest
+      Otel__ServiceName: Eswmp.Work
+      Otel__Endpoint: http://jaeger:4317

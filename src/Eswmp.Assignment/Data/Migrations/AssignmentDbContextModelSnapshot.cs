@@ -62,6 +62,297 @@ namespace Eswmp.Assignment.Data.Migrations
 
                     b.ToTable("AssignmentLogs");
                 });
+
+            modelBuilder.Entity("Eswmp.Assignment.Models.CandidateMatchResult", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("CandidateId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("CandidateType")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("CreatedBy")
+                        .HasColumnType("text");
+
+                    b.Property<Guid>("MatchEvaluationId")
+                        .HasColumnType("uuid");
+
+                    b.Property<double>("NormalizedScore")
+                        .HasColumnType("double precision");
+
+                    b.Property<string>("PrimaryReasonCode")
+                        .HasColumnType("text");
+
+                    b.Property<int>("Rank")
+                        .HasColumnType("integer");
+
+                    b.Property<double>("RawScore")
+                        .HasColumnType("double precision");
+
+                    b.Property<int>("RecommendationLevel")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTimeOffset?>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("UpdatedBy")
+                        .HasColumnType("text");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("MatchEvaluationId");
+
+                    b.ToTable("CandidateMatchResults", "matching");
+                });
+
+            modelBuilder.Entity("Eswmp.Assignment.Models.MatchEvaluation", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("CandidateCount")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("CorrelationId")
+                        .HasColumnType("text");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("CreatedBy")
+                        .HasColumnType("text");
+
+                    b.Property<DateTimeOffset>("EvaluatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTimeOffset>("ExpiresAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid?>("MatchingPolicyId")
+                        .HasColumnType("uuid");
+
+                    b.Property<int?>("MatchingPolicyVersion")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("Status")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("StrategyCode")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset?>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("UpdatedBy")
+                        .HasColumnType("text");
+
+                    b.Property<Guid?>("WorkRequirementId")
+                        .HasColumnType("uuid");
+
+                    b.Property<int?>("WorkRequirementVersion")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("MatchEvaluations", "matching");
+                });
+
+            modelBuilder.Entity("Eswmp.Assignment.Models.MatchFactorEvaluation", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("CandidateMatchResultId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("CreatedBy")
+                        .HasColumnType("text");
+
+                    b.Property<string>("FactorCode")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<double>("NormalizedScore")
+                        .HasColumnType("double precision");
+
+                    b.Property<double?>("RawValue")
+                        .HasColumnType("double precision");
+
+                    b.Property<DateTimeOffset?>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("UpdatedBy")
+                        .HasColumnType("text");
+
+                    b.Property<double>("Weight")
+                        .HasColumnType("double precision");
+
+                    b.Property<double>("WeightedContribution")
+                        .HasColumnType("double precision");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CandidateMatchResultId");
+
+                    b.ToTable("MatchFactorEvaluations", "matching");
+                });
+
+            modelBuilder.Entity("Eswmp.Assignment.Models.MatchingPolicy", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Code")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("CreatedBy")
+                        .HasColumnType("text");
+
+                    b.Property<int>("CurrentVersionNumber")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Description")
+                        .HasColumnType("text");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<int>("Status")
+                        .HasColumnType("integer");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset?>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("UpdatedBy")
+                        .HasColumnType("text");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TenantId", "Code")
+                        .IsUnique();
+
+                    b.ToTable("MatchingPolicies", "matching");
+                });
+
+            modelBuilder.Entity("Eswmp.Assignment.Models.MatchingPolicyVersion", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("CreatedBy")
+                        .HasColumnType("text");
+
+                    b.Property<string>("FactorConfigurationJson")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<Guid>("MatchingPolicyId")
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("Status")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("StrategyCode")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset?>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("UpdatedBy")
+                        .HasColumnType("text");
+
+                    b.Property<int>("VersionNumber")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("MatchingPolicyId", "VersionNumber")
+                        .IsUnique();
+
+                    b.ToTable("MatchingPolicyVersions", "matching");
+                });
+
+            modelBuilder.Entity("Eswmp.Assignment.Models.CandidateMatchResult", b =>
+                {
+                    b.HasOne("Eswmp.Assignment.Models.MatchEvaluation", "MatchEvaluation")
+                        .WithMany("Results")
+                        .HasForeignKey("MatchEvaluationId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("MatchEvaluation");
+                });
+
+            modelBuilder.Entity("Eswmp.Assignment.Models.MatchFactorEvaluation", b =>
+                {
+                    b.HasOne("Eswmp.Assignment.Models.CandidateMatchResult", "CandidateMatchResult")
+                        .WithMany("Factors")
+                        .HasForeignKey("CandidateMatchResultId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("CandidateMatchResult");
+                });
+
+            modelBuilder.Entity("Eswmp.Assignment.Models.MatchingPolicyVersion", b =>
+                {
+                    b.HasOne("Eswmp.Assignment.Models.MatchingPolicy", "MatchingPolicy")
+                        .WithMany("Versions")
+                        .HasForeignKey("MatchingPolicyId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("MatchingPolicy");
+                });
+
+            modelBuilder.Entity("Eswmp.Assignment.Models.CandidateMatchResult", b =>
+                {
+                    b.Navigation("Factors");
+                });
+
+            modelBuilder.Entity("Eswmp.Assignment.Models.MatchEvaluation", b =>
+                {
+                    b.Navigation("Results");
+                });
+
+            modelBuilder.Entity("Eswmp.Assignment.Models.MatchingPolicy", b =>
+                {
+                    b.Navigation("Versions");
+                });
 #pragma warning restore 612, 618
         }
     }

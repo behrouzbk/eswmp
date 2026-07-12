@@ -34,6 +34,10 @@ public static class EswmpPermissions
     public const string AvailabilityRead = "availability.read";
     public const string AvailabilityWrite = "availability.write";
 
+    // Capacity
+    public const string CapacityRead = "capacity.read";
+    public const string CapacityWrite = "capacity.write";
+
     // Reservations
     public const string ReservationCreate = "reservation.create";
     public const string ReservationRead = "reservation.read";
@@ -44,10 +48,23 @@ public static class EswmpPermissions
     public const string AssignmentRead = "assignment.read";
     public const string AssignmentExecute = "assignment.execute";
 
+    // Matching
+    public const string MatchingRead = "matching.read";
+    public const string MatchingExecute = "matching.execute";
+
     // Rules / Workflow
     public const string RuleRead = "rule.read";
     public const string RuleWrite = "rule.write";
     public const string WorkflowTransition = "workflow.transition";
+
+    // Demand Intake
+    public const string DemandCreate = "demand.create";
+    public const string DemandRead = "demand.read";
+    public const string DemandTransition = "demand.transition";
+
+    // Work Requirement
+    public const string WorkRequirementRead = "workrequirement.read";
+    public const string WorkRequirementWrite = "workrequirement.write";
 
     // Admin
     public const string AdminAll = "admin.all";

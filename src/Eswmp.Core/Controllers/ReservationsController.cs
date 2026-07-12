@@ -5,6 +5,7 @@ using Eswmp.Shared.Events;
 using Eswmp.Shared.Middleware;
 using MassTransit;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 
 namespace Eswmp.Core.Controllers;
 
@@ -27,6 +28,19 @@ public class ReservationsController(
     [RequirePermission(EswmpPermissions.ReservationCreate)]
     public async Task<IActionResult> Create(CreateReservationRequest request)
     {
+        var utcNow = DateTimeOffset.UtcNow;
+        var hasConflict = await db.Reservations.AnyAsync(r =>
+            r.ResourceId == request.ResourceId &&
+            (r.Status == ReservationStatus.Confirmed ||
+                (r.Status == ReservationStatus.Held && (r.ExpiresAt == null || r.ExpiresAt > utcNow))) &&
+            r.StartTime < request.EndTime &&
+            request.StartTime < r.EndTime);
+
+        if (hasConflict)
+        {
+            return Conflict(new { error = $"Resource {request.ResourceId} already has an overlapping reservation for the requested time window." });
+        }
+
         var reservation = new Reservation
         {
             TenantId = tenantContext.RequiredTenantId,

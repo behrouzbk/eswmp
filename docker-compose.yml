@@ -97,6 +97,7 @@ services:
       ReverseProxy__Clusters__core__Destinations__primary__Address: http://core:8080
       ReverseProxy__Clusters__assignment__Destinations__primary__Address: http://assignment:8080
       ReverseProxy__Clusters__rules__Destinations__primary__Address: http://rules:8080
+      ReverseProxy__Clusters__work__Destinations__primary__Address: http://work:8080
     ports:
       # 6100, not 6000 — 6000 is Chrome/Firefox's blocked "unsafe port" (X11), browsers refuse to load it.
       - "6100:8080"
@@ -108,6 +109,8 @@ services:
       assignment:
         condition: service_started
       rules:
+        condition: service_started
+      work:
         condition: service_started
 
   # ── Backend Services ─────────────────────────────────────────
@@ -194,6 +197,35 @@ services:
       ApplicationInsights__ConnectionString: ${APPLICATIONINSIGHTS_CONNECTION_STRING}
     ports:
       - "6003:8080"
+    networks:
+      - eswmp-net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  work:
+    build:
+      context: .
+      dockerfile: src/Eswmp.Work/Dockerfile
+    container_name: eswmp-work
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ConnectionStrings__Default: ${WORK_DB}
+      Jwt__SecretKey: ${JWT_SECRET_KEY}
+      Jwt__Issuer: ${JWT_ISSUER}
+      Jwt__Audience: ${JWT_AUDIENCE}
+      MessageBus__Transport: RabbitMQ
+      MessageBus__Host: rabbitmq
+      MessageBus__Port: 5672
+      MessageBus__Username: guest
+      MessageBus__Password: guest
+      Otel__ServiceName: Eswmp.Work
+      Otel__Endpoint: http://jaeger:4317
+      ApplicationInsights__ConnectionString: ${APPLICATIONINSIGHTS_CONNECTION_STRING}
+    ports:
+      - "6004:8080"
     networks:
       - eswmp-net
     depends_on:

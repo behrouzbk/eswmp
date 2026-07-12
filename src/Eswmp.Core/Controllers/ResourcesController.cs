@@ -17,10 +17,35 @@ public record CreateResourceRequest(
     double? LocationLatitude,
     double? LocationLongitude);
 
+public record ResourceLifecycleRequest(string? ReasonCode, string? Comment, int? ExpectedVersion);
+
+public record AddResourceCapabilityRequest(string CapabilityCode, int Level, DateOnly? EffectiveFrom, DateOnly? EffectiveTo);
+public record AddResourceSkillRequest(string SkillCode, int Level, decimal? YearsOfExperience, bool Verified);
+public record AddResourceCertificationRequest(string CertificationTypeCode, string? CredentialReference, DateOnly? IssuedAt, DateOnly? ExpiresAt);
+
 [ApiController]
 [Route("api/v1/resources")]
 public class ResourcesController(CoreDbContext db, ITenantContext tenantContext) : ControllerBase
 {
+    // Valid lifecycle transitions — see architecture-reconciliation plan Task 2.
+    private static readonly IReadOnlyDictionary<string, ResourceStatus[]> AllowedFrom = new Dictionary<string, ResourceStatus[]>
+    {
+        ["activate"] = [ResourceStatus.Draft, ResourceStatus.PendingVerification, ResourceStatus.Inactive],
+        ["suspend"] = [ResourceStatus.Active],
+        ["reactivate"] = [ResourceStatus.Suspended],
+        ["deactivate"] = [ResourceStatus.Active, ResourceStatus.Suspended],
+        ["retire"] = [ResourceStatus.Draft, ResourceStatus.PendingVerification, ResourceStatus.Active, ResourceStatus.Suspended, ResourceStatus.Inactive],
+    };
+
+    private static readonly IReadOnlyDictionary<string, ResourceStatus> TargetStatus = new Dictionary<string, ResourceStatus>
+    {
+        ["activate"] = ResourceStatus.Active,
+        ["suspend"] = ResourceStatus.Suspended,
+        ["reactivate"] = ResourceStatus.Active,
+        ["deactivate"] = ResourceStatus.Inactive,
+        ["retire"] = ResourceStatus.Retired,
+    };
+
     [HttpPost]
     [RequirePermission(EswmpPermissions.ResourceWrite)]
     public async Task<IActionResult> Create(CreateResourceRequest request)
@@ -81,5 +106,123 @@ public class ResourcesController(CoreDbContext db, ITenantContext tenantContext)
     {
         var resource = await db.Resources.FindAsync(id);
         return resource is null ? NotFound() : Ok(resource);
+    }
+
+    [HttpPost("{id:guid}/activate")]
+    [RequirePermission(EswmpPermissions.ResourceWrite)]
+    public Task<IActionResult> Activate(Guid id, ResourceLifecycleRequest request) => Transition(id, "activate", request);
+
+    [HttpPost("{id:guid}/suspend")]
+    [RequirePermission(EswmpPermissions.ResourceWrite)]
+    public Task<IActionResult> Suspend(Guid id, ResourceLifecycleRequest request) => Transition(id, "suspend", request);
+
+    [HttpPost("{id:guid}/reactivate")]
+    [RequirePermission(EswmpPermissions.ResourceWrite)]
+    public Task<IActionResult> Reactivate(Guid id, ResourceLifecycleRequest request) => Transition(id, "reactivate", request);
+
+    [HttpPost("{id:guid}/deactivate")]
+    [RequirePermission(EswmpPermissions.ResourceWrite)]
+    public Task<IActionResult> Deactivate(Guid id, ResourceLifecycleRequest request) => Transition(id, "deactivate", request);
+
+    [HttpPost("{id:guid}/retire")]
+    [RequirePermission(EswmpPermissions.ResourceWrite)]
+    public Task<IActionResult> Retire(Guid id, ResourceLifecycleRequest request) => Transition(id, "retire", request);
+
+    private async Task<IActionResult> Transition(Guid id, string action, ResourceLifecycleRequest request)
+    {
+        var resource = await db.Resources.FindAsync(id);
+        if (resource is null)
+            return NotFound();
+
+        if (request.ExpectedVersion is not null && request.ExpectedVersion.Value != resource.Version)
+        {
+            return StatusCode(StatusCodes.Status412PreconditionFailed, new
+            {
+                error = $"Expected version {request.ExpectedVersion} does not match current version {resource.Version}.",
+            });
+        }
+
+        if (!AllowedFrom[action].Contains(resource.Status))
+        {
+            return Conflict(new { error = $"Cannot {action} a Resource in status {resource.Status}." });
+        }
+
+        resource.Status = TargetStatus[action];
+        resource.Version++;
+        await db.SaveChangesAsync();
+
+        return Ok(resource);
+    }
+
+    [HttpPost("{id:guid}/capabilities")]
+    [RequirePermission(EswmpPermissions.ResourceWrite)]
+    public async Task<IActionResult> AddCapability(Guid id, AddResourceCapabilityRequest request)
+    {
+        var resource = await db.Resources.FindAsync(id);
+        if (resource is null)
+            return NotFound();
+
+        var capability = new ResourceCapability
+        {
+            TenantId = resource.TenantId,
+            ResourceId = id,
+            CapabilityCode = request.CapabilityCode,
+            Level = request.Level,
+            EffectiveFrom = request.EffectiveFrom,
+            EffectiveTo = request.EffectiveTo,
+        };
+
+        db.ResourceCapabilities.Add(capability);
+        await db.SaveChangesAsync();
+
+        return CreatedAtAction(nameof(GetById), new { id }, capability);
+    }
+
+    [HttpPost("{id:guid}/skills")]
+    [RequirePermission(EswmpPermissions.ResourceWrite)]
+    public async Task<IActionResult> AddSkill(Guid id, AddResourceSkillRequest request)
+    {
+        var resource = await db.Resources.FindAsync(id);
+        if (resource is null)
+            return NotFound();
+
+        var skill = new ResourceSkill
+        {
+            TenantId = resource.TenantId,
+            ResourceId = id,
+            SkillCode = request.SkillCode,
+            Level = request.Level,
+            YearsOfExperience = request.YearsOfExperience,
+            Verified = request.Verified,
+        };
+
+        db.ResourceSkills.Add(skill);
+        await db.SaveChangesAsync();
+
+        return CreatedAtAction(nameof(GetById), new { id }, skill);
+    }
+
+    [HttpPost("{id:guid}/certifications")]
+    [RequirePermission(EswmpPermissions.ResourceWrite)]
+    public async Task<IActionResult> AddCertification(Guid id, AddResourceCertificationRequest request)
+    {
+        var resource = await db.Resources.FindAsync(id);
+        if (resource is null)
+            return NotFound();
+
+        var certification = new ResourceCertification
+        {
+            TenantId = resource.TenantId,
+            ResourceId = id,
+            CertificationTypeCode = request.CertificationTypeCode,
+            CredentialReference = request.CredentialReference,
+            IssuedAt = request.IssuedAt,
+            ExpiresAt = request.ExpiresAt,
+        };
+
+        db.ResourceCertifications.Add(certification);
+        await db.SaveChangesAsync();
+
+        return CreatedAtAction(nameof(GetById), new { id }, certification);
     }
 }

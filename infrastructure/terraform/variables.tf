@@ -33,9 +33,21 @@ variable "pg_admin_password" {
 }
 
 variable "jwt_secret_key" {
-  description = "JWT signing secret used to validate tokens issued by consuming products (minimum 32 characters)"
+  description = "Shared HMAC key used to validate JWTs issued by the consuming product. ESWMP validates tokens, it never issues them — this exact value must also be configured on the consuming product's token issuer, minimum 64 bytes."
   type        = string
   sensitive   = true
+}
+
+variable "jwt_issuer" {
+  description = "Expected JWT 'iss' claim — must match the consuming product's token issuer configuration"
+  type        = string
+  default     = "eswmp"
+}
+
+variable "jwt_audience" {
+  description = "Expected JWT 'aud' claim — must match the consuming product's token issuer configuration"
+  type        = string
+  default     = "eswmp-api"
 }
 
 locals {

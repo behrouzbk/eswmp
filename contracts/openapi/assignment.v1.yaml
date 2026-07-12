@@ -50,7 +50,148 @@ paths:
               schema:
                 $ref: '#/components/schemas/AssignmentLog'
 
+  # ── Matching module (schema `matching`) ──────────────────────────────────
+  # Deliberately separate from /assignments above — see spec #08 and
+  # ARCHITECTURE.md's backlog note on reconciling Matching with the existing
+  # AssignmentScorer once an Eligibility spec exists.
+  /api/v1/matching/evaluations:
+    post:
+      tags: [Matching]
+      summary: Evaluate and rank candidates against a work context, persisting the result
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EvaluateMatchRequest'
+      responses:
+        '200':
+          description: Ranked candidates and the persisted evaluation's identity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EvaluateMatchResponse'
+
+  /api/v1/matching/evaluations/{id}:
+    get:
+      tags: [Matching]
+      summary: Get a persisted MatchEvaluation and its ranked results
+      parameters:
+        - $ref: '#/components/parameters/EvaluationId'
+      responses:
+        '200':
+          description: Evaluation detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MatchEvaluationDetail'
+        '404':
+          description: Not found
+
+  /api/v1/matching/evaluations/{id}/candidates/{candidateId}/explanation:
+    get:
+      tags: [Matching]
+      summary: Get the per-factor score breakdown for one candidate within an evaluation
+      parameters:
+        - $ref: '#/components/parameters/EvaluationId'
+        - name: candidateId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Factor-level explanation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CandidateExplanation'
+        '404':
+          description: Not found
+
+  /api/v1/matching/evaluations/{id}/recalculate:
+    post:
+      tags: [Matching]
+      summary: Re-run scoring for a re-supplied candidate set, invalidating the prior evaluation
+      parameters:
+        - $ref: '#/components/parameters/EvaluationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RecalculateMatchRequest'
+      responses:
+        '200':
+          description: New evaluation created; the prior one is marked Invalidated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EvaluateMatchResponse'
+        '404':
+          description: Not found
+
+  /api/v1/matching/matching-policies:
+    post:
+      tags: [Matching]
+      summary: Create a MatchingPolicy
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateMatchingPolicyRequest'
+      responses:
+        '201':
+          description: Policy created
+
+  /api/v1/matching/matching-policies/{id}/versions:
+    post:
+      tags: [Matching]
+      summary: Create a new (Draft) version of a MatchingPolicy's factor configuration
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateMatchingPolicyVersionRequest'
+      responses:
+        '201':
+          description: Version created
+
+  /api/v1/matching/matching-policies/{id}/versions/{version}/activate:
+    post:
+      tags: [Matching]
+      summary: Activate a MatchingPolicyVersion (factor weights must sum to ~1.0); supersedes any prior active version
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: version
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        '200':
+          description: Version activated
+        '400':
+          description: Factor weights do not sum to ~1.0
+        '404':
+          description: Not found
+
 components:
+  parameters:
+    EvaluationId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+
   securitySchemes:
     BearerAuth:
       type: http
@@ -125,3 +266,145 @@ components:
         method: { type: string }
         score: { type: number, format: double, nullable: true }
         assignedAt: { type: string, format: date-time }
+
+    # ── Matching module schemas ─────────────────────────────────────────
+
+    MatchingCandidate:
+      type: object
+      required: [type, id]
+      properties:
+        type: { type: string, description: 'Candidate kind, e.g. "Resource"' }
+        id: { type: string, format: uuid }
+        skills:
+          type: array
+          items: { type: string }
+        latitude: { type: number, format: double, nullable: true }
+        longitude: { type: number, format: double, nullable: true }
+        currentWorkload: { type: integer, default: 0 }
+
+    EvaluateMatchRequest:
+      type: object
+      required: [candidates]
+      properties:
+        workRequirementId: { type: string, format: uuid, nullable: true }
+        workRequirementVersion: { type: integer, nullable: true }
+        matchingPolicyId: { type: string, format: uuid, nullable: true }
+        strategyCode: { type: string, nullable: true, default: BALANCED }
+        requiredSkills:
+          type: array
+          items: { type: string }
+        targetLatitude: { type: number, format: double, nullable: true }
+        targetLongitude: { type: number, format: double, nullable: true }
+        candidates:
+          type: array
+          items: { $ref: '#/components/schemas/MatchingCandidate' }
+        limit: { type: integer, nullable: true }
+        correlationId: { type: string, nullable: true }
+
+    RecalculateMatchRequest:
+      type: object
+      required: [candidates]
+      properties:
+        candidates:
+          type: array
+          items: { $ref: '#/components/schemas/MatchingCandidate' }
+        requiredSkills:
+          type: array
+          items: { type: string }
+        targetLatitude: { type: number, format: double, nullable: true }
+        targetLongitude: { type: number, format: double, nullable: true }
+        strategyCode: { type: string, nullable: true }
+        limit: { type: integer, nullable: true }
+
+    MatchResult:
+      type: object
+      required: [candidateId, candidateType, rank, score, recommendationLevel]
+      properties:
+        candidateId: { type: string, format: uuid }
+        candidateType: { type: string }
+        rank: { type: integer }
+        score: { type: number, format: double }
+        recommendationLevel:
+          type: string
+          enum: [ExcellentMatch, StrongMatch, GoodMatch, PossibleMatch, LowMatch]
+        primaryReasonCode: { type: string, nullable: true }
+
+    EvaluateMatchResponse:
+      type: object
+      required: [matchEvaluationId, evaluatedAt, expiresAt, results]
+      properties:
+        matchEvaluationId: { type: string, format: uuid }
+        evaluatedAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time }
+        results:
+          type: array
+          items: { $ref: '#/components/schemas/MatchResult' }
+
+    MatchEvaluationDetail:
+      type: object
+      required: [id, strategyCode, status, candidateCount, evaluatedAt, expiresAt, results]
+      properties:
+        id: { type: string, format: uuid }
+        workRequirementId: { type: string, format: uuid, nullable: true }
+        workRequirementVersion: { type: integer, nullable: true }
+        matchingPolicyId: { type: string, format: uuid, nullable: true }
+        matchingPolicyVersion: { type: integer, nullable: true }
+        strategyCode: { type: string }
+        status:
+          type: string
+          enum: [Matched, NoMatch, Indeterminate, Invalidated]
+        candidateCount: { type: integer }
+        evaluatedAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time }
+        correlationId: { type: string, nullable: true }
+        results:
+          type: array
+          items: { $ref: '#/components/schemas/MatchResult' }
+
+    FactorExplanation:
+      type: object
+      required: [factorCode, normalizedScore, weight, weightedContribution]
+      properties:
+        factorCode: { type: string }
+        rawValue: { type: number, format: double, nullable: true }
+        normalizedScore: { type: number, format: double }
+        weight: { type: number, format: double }
+        weightedContribution: { type: number, format: double }
+
+    CandidateExplanation:
+      type: object
+      required: [candidateId, candidateType, score, recommendationLevel, factors]
+      properties:
+        candidateId: { type: string, format: uuid }
+        candidateType: { type: string }
+        score: { type: number, format: double }
+        recommendationLevel: { type: string }
+        factors:
+          type: array
+          items: { $ref: '#/components/schemas/FactorExplanation' }
+
+    MatchFactorConfig:
+      type: object
+      required: [factorCode, enabled, weight]
+      properties:
+        factorCode: { type: string }
+        enabled: { type: boolean, default: true }
+        weight: { type: number, format: double }
+        normalizationMethod: { type: string, nullable: true, default: Linear }
+
+    CreateMatchingPolicyRequest:
+      type: object
+      required: [code, name]
+      properties:
+        code: { type: string }
+        name: { type: string }
+        description: { type: string, nullable: true }
+
+    CreateMatchingPolicyVersionRequest:
+      type: object
+      required: [strategyCode, factors]
+      properties:
+        strategyCode: { type: string }
+        factors:
+          type: array
+          items: { $ref: '#/components/schemas/MatchFactorConfig' }

@@ -27,6 +27,7 @@ builder.Services.AddEswmpAuthorization();
 
 // ── Domain services ───────────────────────────────────────────
 builder.Services.AddSingleton<AssignmentScorer>();
+builder.Services.AddSingleton<MatchingScorer>();
 
 // ── MassTransit ───────────────────────────────────────────────
 builder.Services.AddEswmpMessageBus(builder.Configuration);

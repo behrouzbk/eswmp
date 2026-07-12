@@ -16,18 +16,29 @@ owners, breeds, etc.). If a requirement can't be expressed in terms of `Resource
 `externalReferenceType`/`externalReferenceId` pair pointing back into the caller's
 own domain, it does not belong in this repo — it belongs in the consuming product.
 
-Source docs: `docs/ESWMP_VISION.md` (original product rationale) and
-`docs/ARCHITECTURE.md` (technical architecture).
+Source docs: `docs/ESWMP_VISION.md` (original product rationale),
+`docs/ARCHITECTURE.md` (technical architecture), and — as of 2026-07-07 —
+`docs/api/Arch.jpeg` and `docs/api/INDEX.md` (the current, richer target
+domain map: a "Proposed for Workshop Review" diagram plus a series of
+per-domain specs, only some of which exist yet; see `docs/ARCHITECTURE.md`
+§1.1 for how it reconciles with what's actually built).
 
 ## Architecture in One Paragraph
 
-Three ASP.NET Core Web API services in a C# / .NET 9 monorepo, plus a YARP gateway.
-`Eswmp.Core` owns Resource/Calendar/AvailabilityRule/Reservation/Appointment —
-the scheduling primitives. `Eswmp.Assignment` owns auto-assignment scoring — which
-Resource should fulfill a given Reservation. `Eswmp.Rules` owns the workflow state
-machine and tenant-configurable business rules. Each service owns its own
-PostgreSQL database; no service reads another's database directly. Cross-service
-calls use NSwag-generated typed clients sourced from `contracts/openapi/`.
+Four ASP.NET Core Web API services in a C# / .NET 9 monorepo, plus a YARP gateway.
+`Eswmp.Core` owns Resource/Calendar/AvailabilityRule/Reservation/Appointment,
+and — as of the 2026-07-07 target-architecture reconciliation — a Capacity
+module. `Eswmp.Assignment` owns auto-assignment scoring — which Resource
+should fulfill a given Reservation — plus a newer Matching module (richer,
+versioned, explainable candidate ranking). `Eswmp.Rules` owns the workflow
+state machine and tenant-configurable business rules. `Eswmp.Work` (new)
+owns Demand Intake and Work Requirement — converting a caller's
+industry-specific request into ESWMP's generic `Demand`, and defining what a
+piece of work requires before it can be scheduled/assigned. Each service
+owns its own PostgreSQL database; no service reads another's database
+directly, and within a service, modules from the target architecture are
+further isolated by Postgres schema — see rule 11. Cross-service calls use
+NSwag-generated typed clients sourced from `contracts/openapi/`.
 Multi-tenant from day one via a `TenantId` query filter on every entity, resolved
 from a `tenant_id` JWT claim — **this platform does not issue its own JWTs or run
 its own user/login system**; it validates tokens issued by whichever product
@@ -37,13 +48,17 @@ embeds it (PetZiv today, others later).
 
 1. **No vertical-specific concepts.** No `Pet`, `Client`, `Groomer`, `Booking`, or
    any other single-industry noun. Use `Resource`, `Reservation`, `Appointment`,
-   `Calendar`, `AvailabilityRule`. If a consumer needs to attach domain meaning,
-   it goes in `ExternalReferenceType` / `ExternalReferenceId` — an opaque pointer
-   the platform never inspects.
+   `Calendar`, `AvailabilityRule`, `Capacity`, `Demand`, `WorkRequirement`,
+   `Matching`. If a consumer needs to attach domain meaning, it goes in
+   `ExternalReferenceType` / `ExternalReferenceId` — an opaque pointer the
+   platform never inspects. The workshop specs in `docs/api/` illustrate this
+   generality using PetZiv examples (Groomer, Dog Walker, etc.) — that's fine
+   in spec prose explaining applicability, but none of that vocabulary may
+   appear in actual code, consistent with "This is not PetZiv" above.
 2. **Contract-first always**: new cross-service endpoints get their OpenAPI YAML
    written in `contracts/openapi/{service}.v1.yaml` first, then implemented.
 3. **One database per service**: `CoreDbContext`, `AssignmentDbContext`,
-   `RulesDbContext`. Never add entities to the wrong DbContext.
+   `RulesDbContext`, `WorkDbContext`. Never add entities to the wrong DbContext.
 4. **No cross-service DB reads.** Cross-service data access is HTTP (typed client)
    or the event bus, never a direct query into another service's database.
 5. **Use generated clients for cross-service calls.** Never hand-write `HttpClient`
@@ -66,13 +81,23 @@ embeds it (PetZiv today, others later).
     single source of truth for development status — see "Tracking Document
     Synchronization" below. Update all three whenever a task starts, progresses,
     or completes. No exceptions.
+11. **Schema-per-module within a service.** Where a service hosts more than one
+    module from the target architecture (`docs/api/Arch.jpeg` /
+    `docs/api/INDEX.md`) — e.g. `Eswmp.Core`'s Resource/Availability/Capacity
+    modules, `Eswmp.Assignment`'s scoring/Matching modules, `Eswmp.Work`'s
+    Demand Intake/Work Requirement modules — isolate each module's tables in
+    its own Postgres schema, and never let one module's code read or write
+    another module's tables directly. Cross-module data needs go through the
+    owning module's own service/repository class, never a raw query into its
+    tables. This is rule 4 applied one level down, between modules in one
+    service instead of between services. See `docs/ARCHITECTURE.md` §1.2.
 
 ## Tracking Document Synchronization
 
 | Document                          | Role                                                                                                                                                         | Granularity                                                                                                                       |
 | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------- |
 | `docs/DEVELOPMENT_STATUS.md`      | Narrative status + dated changelog, read by humans for "what's the state of things"                                                                          | Component-level (per service/area), plus a chronological changelog                                                                |
-| `docs/TASK_BOARD.md`              | Per-service task list with status symbols (✅ 🟡 🔴 🔵) and a summary scoreboard                                                                                 | Task-code level (`CO-*`, `AS-*`, `RU-*`, `GW-*`, `CC-*`)                                                                          |
+| `docs/TASK_BOARD.md`              | Per-service task list with status symbols (✅ 🟡 🔴 🔵) and a summary scoreboard                                                                                 | Task-code level (`CO-*`, `AS-*`, `RU-*`, `GW-*`, `CC-*`, `WK-*`)                                                                          |
 | `docs/ESWMP_Project_Tracker.xlsx` | Full PM tracker — `Task Tracker` sheet (dates, % complete, effort, risk), `Dashboard` sheet (live formulas over Task Tracker), `Legend & Instructions` sheet | Task-code level, superset of `TASK_BOARD.md` — also covers `ENV-*`, `SCF-*`, `GH-*` setup tasks not broken out in `TASK_BOARD.md` |
 
 Rule: when a task's status changes (started / in progress / blocked / completed),
@@ -96,20 +121,27 @@ lists.
 ## Service Quick Reference
 
 | Service        | Port | DB Name            | Csproj                                         |
-| -------------- | ---- | ------------------ | ---------------------------------------------- |
-| Gateway        | 6100 | N/A                | `src/Eswmp.Gateway/Eswmp.Gateway.csproj`       |
-| Core           | 6001 | `eswmp_core`       | `src/Eswmp.Core/Eswmp.Core.csproj`             |
-| Assignment     | 6002 | `eswmp_assignment` | `src/Eswmp.Assignment/Eswmp.Assignment.csproj` |
-| Rules          | 6003 | `eswmp_rules`      | `src/Eswmp.Rules/Eswmp.Rules.csproj`           |
-| Shared library | N/A  | N/A                | `src/Eswmp.Shared/Eswmp.Shared.csproj`         |
+| -------------- | ---- | ------------------- | ----------------------------------------------- |
+| Gateway        | 6100 | N/A                 | `src/Eswmp.Gateway/Eswmp.Gateway.csproj`        |
+| Core           | 6001 | `eswmp_core`        | `src/Eswmp.Core/Eswmp.Core.csproj`              |
+| Assignment     | 6002 | `eswmp_assignment`  | `src/Eswmp.Assignment/Eswmp.Assignment.csproj`  |
+| Rules          | 6003 | `eswmp_rules`       | `src/Eswmp.Rules/Eswmp.Rules.csproj`            |
+| Work           | 6004 | `eswmp_work`        | `src/Eswmp.Work/Eswmp.Work.csproj`              |
+| Shared library | N/A  | N/A                 | `src/Eswmp.Shared/Eswmp.Shared.csproj`          |
 
 ## Key Entity Ownership
 
-| Entity                                                                                                                              | Service    | DbContext             |
-| ----------------------------------------------------------------------------------------------------------------------------------- | ---------- | --------------------- |
-| Tenant, Resource, Calendar, AvailabilityRule, AvailabilityException, Reservation, Appointment, DurationSizeBracket, DurationTagRule | Core       | `CoreDbContext`       |
-| AssignmentLog, AssignmentRule                                                                                                       | Assignment | `AssignmentDbContext` |
-| BusinessRule, WorkflowTransitionLog                                                                                                 | Rules      | `RulesDbContext`      |
+| Entity                                                                                                                                                                                                                                                                                    | Service    | DbContext             | Schema (rule 11) |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------- | ---------------------- | ------------------ |
+| Tenant, Reservation, Appointment, DurationSizeBracket, DurationTagRule                                                                                                                                                                                                                     | Core       | `CoreDbContext`        | default             |
+| Resource, ResourceType, ResourceCapability, ResourceSkill, ResourceCertification                                                                                                                                                                                                           | Core       | `CoreDbContext`        | `resource`          |
+| AvailabilityProfile, AvailabilityRule, AvailabilityException, TimeOff, AvailabilityOverride                                                                                                                                                                                                | Core       | `CoreDbContext`        | `availability`      |
+| CapacityProfile, CapacityDefinition, CapacityHold, CapacityConsumption, CapacityOverride, CapacityLedgerEntry                                                                                                                                                                              | Core       | `CoreDbContext`        | `capacity`          |
+| AssignmentLog                                                                                                                                                                                                                                                                               | Assignment | `AssignmentDbContext`  | default             |
+| MatchEvaluation, CandidateMatchResult, MatchFactorEvaluation, MatchingPolicy, MatchingPolicyVersion                                                                                                                                                                                        | Assignment | `AssignmentDbContext`  | `matching`          |
+| BusinessRule, WorkflowTransitionLog                                                                                                                                                                                                                                                         | Rules      | `RulesDbContext`       | default             |
+| Demand, DemandValidationResult                                                                                                                                                                                                                                                              | Work       | `WorkDbContext`        | `demand`            |
+| WorkRequirement, RequirementVersion, RequirementSnapshot, ResourceRequirement, CapabilityRequirement, SkillRequirement, CertificationRequirement, LocationConstraint                                                                                                                       | Work       | `WorkDbContext`        | `requirements`      |
 
 ## Naming & Style Conventions
 
@@ -137,7 +169,7 @@ repo, not here.
 
 | Phase   | Focus                                                                                                                                                                     | Status        |
 | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------- |
-| Phase 0 | Scaffold: Core/Assignment/Rules/Gateway skeletons, Resource/Reservation model, generalized Slot Optimizer + Duration Estimator, Assignment Scorer, Workflow state machine | 🟡 In Progress |
+| Phase 0 | Scaffold: Core/Assignment/Rules/Work/Gateway skeletons, Resource/Reservation model, generalized Slot Optimizer + Duration Estimator, Assignment Scorer, Workflow state machine, Capacity/Matching/Demand Intake/Work Requirement modules per `docs/api/INDEX.md` | 🟡 In Progress |
 | Phase 1 | Full Core CRUD + confirm/cancel reservation flow, first real tenant integration (PetZiv)                                                                                  | ⬜ Not Started |
 | Phase 2 | Rules engine hardening, workflow engine (approval steps), routing/geofencing                                                                                              | ⬜ Not Started |
 | Phase 3 | Multi-tenant licensing surface (API keys, usage metering, billing hooks)                                                                                                  | ⬜ Not Started |

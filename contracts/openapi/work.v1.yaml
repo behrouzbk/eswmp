@@ -1,0 +1,816 @@
+openapi: 3.1.0
+info:
+  title: ESWMP Work API
+  version: v1
+  description: |
+    Demand Intake and Work Requirement modules (docs/api "Demand Intake #01",
+    "Work Requirement #02"). Demand Intake receives raw units of work from a
+    caller's own domain via an opaque externalReferenceType/externalReferenceId
+    pair and carries them through a validate/accept/reject/cancel lifecycle.
+    Work Requirement defines the versioned, immutable-once-active "what kind of
+    work this is" shape (resource/capability/skill/certification needs,
+    duration, location constraints) that a Demand can be matched against.
+    This service never stores or returns any data belonging to the caller's
+    own domain beyond the opaque reference pair — see CLAUDE.md rule 1.
+servers:
+  - url: http://localhost:6004
+    description: Local development
+security:
+  - BearerAuth: []
+
+paths:
+  /api/v1/demands:
+    post:
+      tags: [Demands]
+      summary: Submit a Demand
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string }
+          description: >
+            Replays the original response if the same key is sent again with the
+            same effective request body; returns 409 if the same key is sent with
+            a different body.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateDemandRequest'
+      responses:
+        '201':
+          description: Demand created (or the original response, replayed for a repeated idempotency key)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Demand'
+        '400':
+          description: Missing Idempotency-Key header, or the request failed validation (code=VALIDATION_FAILED)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+        '409':
+          description: Idempotency-Key reused with a different request body (code=IDEMPOTENCY_CONFLICT)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+
+  /api/v1/demands/search:
+    post:
+      tags: [Demands]
+      summary: Paged search over Demands
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DemandSearchRequest'
+      responses:
+        '200':
+          description: Paged demand list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PagedDemandResult'
+
+  /api/v1/demands/{id}:
+    get:
+      tags: [Demands]
+      summary: Get a single Demand
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: Demand detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Demand'
+        '404':
+          description: Not found (code=NOT_FOUND)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    patch:
+      tags: [Demands]
+      summary: >
+        Update mutable Demand fields. Mutability depends on status: Received/
+        Validating are broadly mutable, Ready is restricted to Priority only,
+        Accepted/Rejected/Cancelled/Expired are immutable.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateDemandRequest'
+      responses:
+        '200':
+          description: Updated Demand
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Demand'
+        '409':
+          description: Field not mutable in the Demand's current status (code=STATUS_CONFLICT)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+        '412':
+          description: expectedVersion did not match the Demand's current version (code=VERSION_CONFLICT)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+
+  /api/v1/demands/{id}/validate:
+    post:
+      tags: [Demands]
+      summary: Run validation and transition Received/Validating -> Ready (or stay Received if Invalid)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: Validation result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DemandValidationResult'
+        '409':
+          description: Demand is in a terminal status (code=STATUS_CONFLICT)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+
+  /api/v1/demands/{id}/accept:
+    post:
+      tags: [Demands]
+      summary: Accept a Ready Demand. Requires demand.transition.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: Accepted Demand
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Demand'
+        '409':
+          description: Demand is not Ready (code=STATUS_CONFLICT)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+
+  /api/v1/demands/{id}/reject:
+    post:
+      tags: [Demands]
+      summary: Reject a Demand (reasonCode is mandatory). Requires demand.transition.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RejectDemandRequest'
+      responses:
+        '200':
+          description: Rejected Demand
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Demand'
+        '400':
+          description: reasonCode missing (code=VALIDATION_FAILED)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+        '409':
+          description: Demand already in an immutable status (code=STATUS_CONFLICT)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+
+  /api/v1/demands/{id}/cancel:
+    post:
+      tags: [Demands]
+      summary: Cancel a Demand. Requires demand.transition.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: Cancelled Demand
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Demand'
+        '409':
+          description: Demand already in an immutable status (code=STATUS_CONFLICT)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+
+  /api/v1/demands/{id}/history:
+    get:
+      tags: [Demands]
+      summary: >
+        Demand status/change history. No dedicated audit table exists yet for
+        Eswmp.Work — returns an empty list for MVP rather than 404/501, so
+        callers can integrate against the final shape now.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: History entries (currently always empty)
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {}
+        '404':
+          description: Demand not found (code=NOT_FOUND)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+
+  /api/v1/work-requirements:
+    post:
+      tags: [WorkRequirements]
+      summary: Create a WorkRequirement (starts empty, Draft, with no versions)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateWorkRequirementRequest'
+      responses:
+        '201':
+          description: WorkRequirement created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkRequirement'
+        '409':
+          description: Code already in use for this tenant
+
+  /api/v1/work-requirements/search:
+    post:
+      tags: [WorkRequirements]
+      summary: Paged search over WorkRequirements
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WorkRequirementSearchRequest'
+      responses:
+        '200':
+          description: Paged WorkRequirement list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PagedWorkRequirementResult'
+
+  /api/v1/work-requirements/{id}:
+    get:
+      tags: [WorkRequirements]
+      summary: Get a WorkRequirement with all of its versions
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: WorkRequirement detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkRequirement'
+        '404':
+          description: Not found
+
+  /api/v1/work-requirements/{id}/versions:
+    post:
+      tags: [WorkRequirements]
+      summary: Create a new Draft RequirementVersion
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RequirementVersionRequest'
+      responses:
+        '201':
+          description: Draft RequirementVersion created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RequirementVersion'
+
+  /api/v1/work-requirements/{id}/versions/{versionNumber}:
+    get:
+      tags: [WorkRequirements]
+      summary: Get a single RequirementVersion with its child requirements
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: versionNumber, in: path, required: true, schema: { type: integer } }
+      responses:
+        '200':
+          description: RequirementVersion detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RequirementVersion'
+        '404':
+          description: Not found
+    patch:
+      tags: [WorkRequirements]
+      summary: Edit a Draft RequirementVersion (409 if not Draft)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: versionNumber, in: path, required: true, schema: { type: integer } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RequirementVersionRequest'
+      responses:
+        '200':
+          description: Updated RequirementVersion
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RequirementVersion'
+        '409':
+          description: Version is not Draft
+
+  /api/v1/work-requirements/{id}/versions/{versionNumber}/validate:
+    post:
+      tags: [WorkRequirements]
+      summary: >
+        Basic validation: duration fields internally consistent, at least one
+        ResourceRequirement present. Marks the version Validated on success.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: versionNumber, in: path, required: true, schema: { type: integer } }
+      responses:
+        '200':
+          description: Validation outcome
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RequirementValidationOutcome'
+
+  /api/v1/work-requirements/{id}/versions/{versionNumber}/activate:
+    post:
+      tags: [WorkRequirements]
+      summary: >
+        Activate a Draft-passing-validate or Validated version; supersedes the
+        prior Active version. Requires expectedVersion (optimistic concurrency
+        on the parent WorkRequirement).
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: versionNumber, in: path, required: true, schema: { type: integer } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ActivateVersionRequest'
+      responses:
+        '200':
+          description: Activated RequirementVersion
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RequirementVersion'
+        '409':
+          description: Version is not Draft/Validated
+        '412':
+          description: expectedVersion did not match the WorkRequirement's current concurrency version
+        '422':
+          description: Validation failed while activating a Draft version
+
+  /api/v1/work-requirements/{id}/retire:
+    post:
+      tags: [WorkRequirements]
+      summary: Retire a WorkRequirement (and its Active version, if any)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: Retired WorkRequirement
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkRequirement'
+        '409':
+          description: Already Retired
+
+  /api/v1/work-requirements/{id}/snapshots:
+    post:
+      tags: [WorkRequirements]
+      summary: Freeze a RequirementVersion (+ children) into an immutable RequirementSnapshot
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateSnapshotRequest'
+      responses:
+        '201':
+          description: RequirementSnapshot created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RequirementSnapshot'
+
+  /api/v1/work-requirement-snapshots/{id}:
+    get:
+      tags: [WorkRequirements]
+      summary: Get a RequirementSnapshot by id
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: RequirementSnapshot detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RequirementSnapshot'
+        '404':
+          description: Not found
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    DemandStatus:
+      type: string
+      enum: [Received, Validating, Ready, Accepted, Rejected, Cancelled, Expired]
+
+    DemandPriority:
+      type: string
+      enum: [Low, Normal, High, Urgent, Critical]
+
+    DemandFulfillmentMode:
+      type: string
+      description: >
+        The timing axis — how a demand is fulfilled in time. Orthogonal to
+        demandType (the caller-defined nature-of-work axis): any demandType can
+        pair with any fulfillmentMode. Platform-owned and closed. Defaults to
+        Scheduled.
+      enum: [OnDemand, Scheduled, Recurring, Standby]
+
+    CreateDemandRequest:
+      type: object
+      required: [demandType, sourceSystem, externalReferenceType, externalReferenceId]
+      properties:
+        organizationId: { type: string, format: uuid, nullable: true }
+        demandType: { type: string }
+        fulfillmentMode:
+          allOf: [{ $ref: '#/components/schemas/DemandFulfillmentMode' }]
+          description: Defaults to Scheduled if omitted.
+        sourceSystem: { type: string }
+        sourceChannel: { type: string, nullable: true }
+        priority:
+          allOf: [{ $ref: '#/components/schemas/DemandPriority' }]
+          description: Defaults to Normal if omitted.
+        summary: { type: string, nullable: true }
+        description: { type: string, nullable: true }
+        requestedStartAtUtc: { type: string, format: date-time, nullable: true }
+        requestedEndAtUtc: { type: string, format: date-time, nullable: true }
+        requestedTimezone: { type: string, nullable: true }
+        locationReference:
+          type: string
+          nullable: true
+          description: Opaque JSON blob — no Location service exists yet
+        externalReferenceType: { type: string }
+        externalReferenceId: { type: string }
+
+    UpdateDemandRequest:
+      type: object
+      required: [expectedVersion]
+      properties:
+        expectedVersion: { type: integer }
+        priority: { $ref: '#/components/schemas/DemandPriority' }
+        summary: { type: string, nullable: true }
+        description: { type: string, nullable: true }
+        requestedStartAtUtc: { type: string, format: date-time, nullable: true }
+        requestedEndAtUtc: { type: string, format: date-time, nullable: true }
+        requestedTimezone: { type: string, nullable: true }
+        locationReference: { type: string, nullable: true }
+        fulfillmentMode:
+          allOf: [{ $ref: '#/components/schemas/DemandFulfillmentMode' }]
+          description: Mutable only while the demand is Received.
+
+    DemandSearchRequest:
+      type: object
+      properties:
+        status: { $ref: '#/components/schemas/DemandStatus' }
+        priority: { $ref: '#/components/schemas/DemandPriority' }
+        demandType: { type: string, nullable: true }
+        fulfillmentMode: { $ref: '#/components/schemas/DemandFulfillmentMode' }
+        fromUtc: { type: string, format: date-time, nullable: true }
+        toUtc: { type: string, format: date-time, nullable: true }
+        page: { type: integer, default: 1 }
+        pageSize: { type: integer, default: 20 }
+
+    RejectDemandRequest:
+      type: object
+      required: [reasonCode]
+      properties:
+        reasonCode: { type: string }
+        comment: { type: string, nullable: true }
+
+    Demand:
+      type: object
+      required:
+        - id, tenantId, demandType, fulfillmentMode, sourceSystem, status, priority
+        - externalReferenceType, externalReferenceId, version
+      properties:
+        id: { type: string, format: uuid }
+        tenantId: { type: string, format: uuid }
+        organizationId: { type: string, format: uuid, nullable: true }
+        demandType: { type: string }
+        fulfillmentMode: { $ref: '#/components/schemas/DemandFulfillmentMode' }
+        sourceSystem: { type: string }
+        sourceChannel: { type: string, nullable: true }
+        status: { $ref: '#/components/schemas/DemandStatus' }
+        priority: { $ref: '#/components/schemas/DemandPriority' }
+        summary: { type: string, nullable: true }
+        description: { type: string, nullable: true }
+        requestedStartAtUtc: { type: string, format: date-time, nullable: true }
+        requestedEndAtUtc: { type: string, format: date-time, nullable: true }
+        requestedTimezone: { type: string, nullable: true }
+        locationReference: { type: string, nullable: true }
+        requirementReferenceId: { type: string, format: uuid, nullable: true }
+        externalReferenceType: { type: string }
+        externalReferenceId: { type: string }
+        version: { type: integer }
+
+    DemandValidationIssue:
+      type: object
+      required: [code, severity, message]
+      properties:
+        field: { type: string, nullable: true }
+        code: { type: string }
+        severity: { type: string, enum: [Error, Warning] }
+        message: { type: string }
+
+    ErrorEnvelope:
+      type: object
+      required: [error, code, traceId]
+      description: The shape every 4xx response from the Demands API shares.
+      properties:
+        error: { type: string, description: Human-readable summary (backward-compatible). }
+        code:
+          type: string
+          description: Stable, machine-branchable discriminator.
+          enum:
+            - VALIDATION_FAILED
+            - IDEMPOTENCY_CONFLICT
+            - VERSION_CONFLICT
+            - STATUS_CONFLICT
+            - NOT_FOUND
+        traceId: { type: string, description: Correlation id for support requests. }
+        issues:
+          type: array
+          description: Present when field-level detail exists (VALIDATION_FAILED and some STATUS_CONFLICT cases).
+          items: { $ref: '#/components/schemas/DemandValidationIssue' }
+
+    PagedDemandResult:
+      type: object
+      required: [items, page, pageSize, totalCount]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Demand' }
+        page: { type: integer }
+        pageSize: { type: integer }
+        totalCount: { type: integer }
+
+    DemandValidationResult:
+      type: object
+      required: [demandId, status, validatedAt, issues]
+      properties:
+        demandId: { type: string, format: uuid }
+        status:
+          type: string
+          enum: [Invalid, ValidWithWarnings, Valid]
+        validatedAt: { type: string, format: date-time }
+        issues:
+          type: array
+          items: { $ref: '#/components/schemas/DemandValidationIssue' }
+
+    WorkRequirementStatus:
+      type: string
+      enum: [Draft, Active, Inactive, Retired]
+
+    RequirementVersionStatus:
+      type: string
+      enum: [Draft, Validated, Active, Superseded, Retired]
+
+    DurationType:
+      type: string
+      enum: [Fixed, Range]
+
+    CapabilityImportance:
+      type: string
+      enum: [Mandatory, Preferred, Optional]
+
+    LocationConstraintMode:
+      type: string
+      enum: [FixedLocation, CustomerLocation, ResourceLocation, Virtual, Flexible]
+
+    CreateWorkRequirementRequest:
+      type: object
+      required: [code, name]
+      properties:
+        code: { type: string }
+        name: { type: string }
+        description: { type: string, nullable: true }
+        category: { type: string, nullable: true }
+
+    WorkRequirementSearchRequest:
+      type: object
+      properties:
+        status: { $ref: '#/components/schemas/WorkRequirementStatus' }
+        category: { type: string, nullable: true }
+        page: { type: integer, default: 1 }
+        pageSize: { type: integer, default: 20 }
+
+    WorkRequirement:
+      type: object
+      required: [id, tenantId, code, name, status, currentVersionNumber, concurrencyVersion]
+      properties:
+        id: { type: string, format: uuid }
+        tenantId: { type: string, format: uuid }
+        code: { type: string }
+        name: { type: string }
+        description: { type: string, nullable: true }
+        category: { type: string, nullable: true }
+        status: { $ref: '#/components/schemas/WorkRequirementStatus' }
+        currentVersionNumber: { type: integer }
+        activeVersionNumber: { type: integer, nullable: true }
+        concurrencyVersion: { type: integer }
+        versions:
+          type: array
+          items: { $ref: '#/components/schemas/RequirementVersion' }
+
+    PagedWorkRequirementResult:
+      type: object
+      required: [items, page, pageSize, totalCount]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/WorkRequirement' }
+        page: { type: integer }
+        pageSize: { type: integer }
+        totalCount: { type: integer }
+
+    CapabilityRequirementDto:
+      type: object
+      required: [capabilityCode, importance]
+      properties:
+        capabilityCode: { type: string }
+        minimumLevel: { type: integer, nullable: true }
+        importance: { $ref: '#/components/schemas/CapabilityImportance' }
+
+    SkillRequirementDto:
+      type: object
+      required: [skillCode, mandatory]
+      properties:
+        skillCode: { type: string }
+        minimumLevel: { type: integer, nullable: true }
+        mandatory: { type: boolean }
+
+    CertificationRequirementDto:
+      type: object
+      required: [certificationTypeCode, mandatory]
+      properties:
+        certificationTypeCode: { type: string }
+        mandatory: { type: boolean }
+
+    ResourceRequirementDto:
+      type: object
+      required: [resourceTypeCode, minimumQuantity, preferredQuantity, maximumQuantity, mandatory]
+      properties:
+        resourceTypeCode: { type: string }
+        role: { type: string, nullable: true }
+        minimumQuantity: { type: integer }
+        preferredQuantity: { type: integer }
+        maximumQuantity: { type: integer }
+        mandatory: { type: boolean }
+        capabilities:
+          type: array
+          nullable: true
+          items: { $ref: '#/components/schemas/CapabilityRequirementDto' }
+        skills:
+          type: array
+          nullable: true
+          items: { $ref: '#/components/schemas/SkillRequirementDto' }
+        certifications:
+          type: array
+          nullable: true
+          items: { $ref: '#/components/schemas/CertificationRequirementDto' }
+
+    LocationConstraintDto:
+      type: object
+      required: [mode]
+      properties:
+        mode: { $ref: '#/components/schemas/LocationConstraintMode' }
+        maximumTravelDistanceKm: { type: number, nullable: true }
+        maximumTravelTimeMinutes: { type: integer, nullable: true }
+
+    RequirementVersionRequest:
+      type: object
+      required: [durationType, preWorkBufferMinutes, postWorkBufferMinutes, resourceRequirements]
+      properties:
+        changeSummary: { type: string, nullable: true }
+        effectiveFrom: { type: string, format: date, nullable: true }
+        effectiveTo: { type: string, format: date, nullable: true }
+        durationType: { $ref: '#/components/schemas/DurationType' }
+        fixedDurationMinutes: { type: integer, nullable: true }
+        minimumDurationMinutes: { type: integer, nullable: true }
+        expectedDurationMinutes: { type: integer, nullable: true }
+        maximumDurationMinutes: { type: integer, nullable: true }
+        preWorkBufferMinutes: { type: integer, default: 0 }
+        postWorkBufferMinutes: { type: integer, default: 0 }
+        resourceRequirements:
+          type: array
+          items: { $ref: '#/components/schemas/ResourceRequirementDto' }
+        locationConstraints:
+          type: array
+          nullable: true
+          items: { $ref: '#/components/schemas/LocationConstraintDto' }
+
+    RequirementVersion:
+      type: object
+      required: [id, workRequirementId, versionNumber, status, durationType, preWorkBufferMinutes, postWorkBufferMinutes]
+      properties:
+        id: { type: string, format: uuid }
+        workRequirementId: { type: string, format: uuid }
+        versionNumber: { type: integer }
+        status: { $ref: '#/components/schemas/RequirementVersionStatus' }
+        effectiveFrom: { type: string, format: date, nullable: true }
+        effectiveTo: { type: string, format: date, nullable: true }
+        changeSummary: { type: string, nullable: true }
+        durationType: { $ref: '#/components/schemas/DurationType' }
+        fixedDurationMinutes: { type: integer, nullable: true }
+        minimumDurationMinutes: { type: integer, nullable: true }
+        expectedDurationMinutes: { type: integer, nullable: true }
+        maximumDurationMinutes: { type: integer, nullable: true }
+        preWorkBufferMinutes: { type: integer }
+        postWorkBufferMinutes: { type: integer }
+        resourceRequirements:
+          type: array
+          items: { $ref: '#/components/schemas/ResourceRequirementDto' }
+        locationConstraints:
+          type: array
+          items: { $ref: '#/components/schemas/LocationConstraintDto' }
+
+    RequirementValidationOutcome:
+      type: object
+      required: [status, issues]
+      properties:
+        status:
+          type: string
+          enum: [Valid, Invalid]
+        issues:
+          type: array
+          items: { type: string }
+
+    ActivateVersionRequest:
+      type: object
+      required: [expectedVersion]
+      properties:
+        expectedVersion: { type: integer }
+
+    CreateSnapshotRequest:
+      type: object
+      required: [versionNumber]
+      properties:
+        versionNumber: { type: integer }
+        reason: { type: string, nullable: true }
+
+    RequirementSnapshot:
+      type: object
+      required: [id, tenantId, sourceRequirementId, sourceVersionNumber, definitionJson]
+      properties:
+        id: { type: string, format: uuid }
+        tenantId: { type: string, format: uuid }
+        sourceRequirementId: { type: string, format: uuid }
+        sourceVersionNumber: { type: integer }
+        definitionJson:
+          type: string
+          description: Serialized copy of the RequirementVersion + its children at freeze time
+        reason: { type: string, nullable: true }
