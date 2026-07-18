@@ -20,7 +20,7 @@ jwt_audience   = "eswmp-api"
 # reasoning. budget_alert_email has no default; fill in a real inbox (or a
 # distribution list your whole team reads) that someone actually checks.
 budget_alert_email   = "REPLACE_ME@yourcompany.com"
-monthly_budget_amount = 150
+monthly_budget_amount = 100
 
 # Leave false unless CO-11 (Redis-backed slot search caching) has actually
 # been implemented — see variables.tf's description for why.

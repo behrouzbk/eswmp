@@ -62,9 +62,9 @@ variable "budget_alert_email" {
 }
 
 variable "monthly_budget_amount" {
-  description = "Monthly spend threshold (in the subscription's billing currency) for the Consumption Budget alert. Sized as a guardrail against the shared QA credit running out early, not a hard cap — Azure budgets alert, they do not block spend."
+  description = "Monthly spend threshold (in the subscription's billing currency) for the Consumption Budget alert. Sized as a guardrail against the shared QA credit running out early, not a hard cap — Azure budgets alert, they do not block spend. Set below realistic QA spend ($40-75/mo per docs/Azure/QA-ENVIRONMENT-GUIDE.md §2) so the 50% alert fires early rather than late against a fixed, time-boxed credit."
   type        = number
-  default     = 150
+  default     = 100
 }
 
 locals {
