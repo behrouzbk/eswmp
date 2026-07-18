@@ -15,3 +15,13 @@ pg_admin_password = "REPLACE_ME" # generate with: openssl rand -base64 24
 jwt_secret_key = "REPLACE_ME_MIN_64_BYTES"
 jwt_issuer     = "eswmp"
 jwt_audience   = "eswmp-api"
+
+# Cost guardrails — see docs/azure/QA-ENVIRONMENT-GUIDE.md for the full
+# reasoning. budget_alert_email has no default; fill in a real inbox (or a
+# distribution list your whole team reads) that someone actually checks.
+budget_alert_email   = "REPLACE_ME@yourcompany.com"
+monthly_budget_amount = 150
+
+# Leave false unless CO-11 (Redis-backed slot search caching) has actually
+# been implemented — see variables.tf's description for why.
+deploy_redis = false

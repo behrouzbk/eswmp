@@ -1,505 +1,651 @@
 using System.Text.Json;
 using Eswmp.Shared.Auth;
-using Eswmp.Shared.DTOs;
 using Eswmp.Shared.Events;
 using Eswmp.Shared.Middleware;
 using Eswmp.Work.Data;
 using Eswmp.Work.Models;
-using MassTransit;
+using Eswmp.Work.Services;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 
 namespace Eswmp.Work.Controllers;
 
-public record CreateWorkRequirementRequest(string Code, string Name, string? Description, string? Category);
+public record ResolveWorkRequirementRequest(string SourceType, string SourceId, int? SourceVersion, string TemplateCode, JsonElement? Inputs);
+public record ReviseWorkRequirementRequest(int ExpectedVersion, string? Reason, JsonElement? Changes);
 
-public record WorkRequirementSearchRequest(
-    WorkRequirementStatus? Status,
-    string? Category,
-    int Page = 1,
-    int PageSize = 20);
-
-public record CapabilityRequirementDto(string CapabilityCode, int? MinimumLevel, CapabilityImportance Importance);
-public record SkillRequirementDto(string SkillCode, int? MinimumLevel, bool Mandatory);
-public record CertificationRequirementDto(string CertificationTypeCode, bool Mandatory);
-
-public record ResourceRequirementDto(
-    string ResourceTypeCode,
-    string? Role,
-    int MinimumQuantity,
-    int PreferredQuantity,
-    int MaximumQuantity,
-    bool Mandatory,
-    List<CapabilityRequirementDto>? Capabilities,
-    List<SkillRequirementDto>? Skills,
-    List<CertificationRequirementDto>? Certifications);
-
-public record LocationConstraintDto(
-    LocationConstraintMode Mode,
-    decimal? MaximumTravelDistanceKm,
-    int? MaximumTravelTimeMinutes);
-
-public record RequirementVersionRequest(
-    string? ChangeSummary,
-    DateOnly? EffectiveFrom,
-    DateOnly? EffectiveTo,
-    DurationType DurationType,
-    int? FixedDurationMinutes,
-    int? MinimumDurationMinutes,
-    int? ExpectedDurationMinutes,
-    int? MaximumDurationMinutes,
-    int PreWorkBufferMinutes,
-    int PostWorkBufferMinutes,
-    List<ResourceRequirementDto> ResourceRequirements,
-    List<LocationConstraintDto>? LocationConstraints);
-
-public record ActivateVersionRequest(int ExpectedVersion);
-
-public record CreateSnapshotRequest(int VersionNumber, string? Reason);
-
+/// <summary>
+/// docs/api/specs/02-work-requirement-api.md §5. The core operation is `resolve`: translate a
+/// Demand plus a Template into an operational requirement — the canonical contract every
+/// downstream service (Eligibility, Matching, Capacity, Scheduling) reads.
+/// </summary>
 [ApiController]
 [Route("api/v1/work-requirements")]
 public class WorkRequirementsController(
     WorkDbContext db,
     ITenantContext tenantContext,
-    IPublishEndpoint publishEndpoint) : ControllerBase
+    IOutboxPublisher outbox) : ControllerBase
 {
-    [HttpPost]
-    [RequirePermission(EswmpPermissions.WorkRequirementWrite)]
-    public async Task<IActionResult> Create(CreateWorkRequirementRequest request)
-    {
-        var tenantId = tenantContext.RequiredTenantId;
+    private static readonly WorkRequirementStatus[] TerminalStatuses = [WorkRequirementStatus.Cancelled, WorkRequirementStatus.Completed];
 
-        var codeExists = await db.WorkRequirements.AnyAsync(w => w.Code == request.Code);
-        if (codeExists)
+    [HttpPost("resolve")]
+    [RequirePermission(EswmpPermissions.WorkRequirementResolve)]
+    public async Task<IActionResult> Resolve(
+        ResolveWorkRequirementRequest request,
+        [FromHeader(Name = "Idempotency-Key")] string? idempotencyKey)
+    {
+        if (string.IsNullOrWhiteSpace(idempotencyKey))
         {
-            return Conflict(new { error = $"Code '{request.Code}' is already in use for this tenant." });
+            return this.ValidationFailed("The Idempotency-Key header is required.");
         }
 
-        var workRequirement = new WorkRequirement
+        var tenantId = tenantContext.RequiredTenantId;
+        var requestHash = WorkRequirementControllerExtensions.HashRequest(request);
+
+        var existing = await db.WorkRequirementIdempotencyRecords
+            .FirstOrDefaultAsync(r => r.TenantId == tenantId && r.IdempotencyKey == idempotencyKey && r.Operation == "resolve");
+        if (existing is not null)
+        {
+            return existing.RequestHash != requestHash
+                ? this.IdempotencyConflict(idempotencyKey)
+                : StatusCode(StatusCodes.Status201Created, JsonSerializer.Deserialize<JsonElement>(existing.ResponseBodyJson));
+        }
+
+        if (request.Inputs is { } inputsElement)
+        {
+            try
+            {
+                JsonGuard.Validate(inputsElement.GetRawText(), "inputs");
+            }
+            catch (JsonBoundsExceededException ex)
+            {
+                return this.ErrorResult(StatusCodes.Status413PayloadTooLarge, "PAYLOAD_TOO_LARGE", ex.Message);
+            }
+        }
+
+        var template = await db.RequirementTemplates.FirstOrDefaultAsync(t => t.Code == request.TemplateCode);
+        var activeVersion = template is null ? null : await db.RequirementTemplateVersions
+            .FirstOrDefaultAsync(v => v.TemplateId == template.Id && v.Status == TemplateVersionStatus.Active);
+        if (template is null || activeVersion is null)
+        {
+            return this.ErrorResult(StatusCodes.Status409Conflict, "TEMPLATE_NOT_ACTIVE",
+                $"Template '{request.TemplateCode}' has no Active version.");
+        }
+
+        var definitions = JsonSerializer.Deserialize<RequirementSetDto>(activeVersion.DefinitionJson, RequirementResolutionService.JsonOptions);
+        if (definitions is null)
+        {
+            return this.ErrorResult(StatusCodes.Status409Conflict, "TEMPLATE_NOT_ACTIVE",
+                $"Template '{request.TemplateCode}' version {activeVersion.Version} has no requirement definitions configured.");
+        }
+
+        var wr = new WorkRequirement
         {
             TenantId = tenantId,
-            Code = request.Code,
-            Name = request.Name,
-            Description = request.Description,
-            Category = request.Category,
+            SourceType = request.SourceType,
+            SourceId = request.SourceId,
+            SourceVersion = request.SourceVersion,
+            TemplateId = template.Id,
+            TemplateVersion = activeVersion.Version,
+            WorkType = template.WorkType,
+            Status = WorkRequirementStatus.Draft,
+            RequirementVersion = 1,
+        };
+        RequirementResolutionService.ApplyDefinitions(wr, definitions, tenantId);
+        RequirementResolutionService.ApplyInputs(wr, request.Inputs, tenantId);
+
+        var issues = RequirementValidationService.Evaluate(wr);
+        var errors = issues.Where(i => i.Severity == "Error")
+            .Select(i => new RequirementIssueDto(i.Path, i.Code, i.Severity, i.Message)).ToList();
+        if (errors.Count > 0)
+        {
+            return this.InvalidWorkRequirement(errors);
+        }
+
+        var warnings = issues.Where(i => i.Severity == "Warning").Select(i => i.Message).ToList();
+        wr.Status = WorkRequirementStatus.Valid;
+
+        db.WorkRequirements.Add(wr);
+        db.RequirementVersions.Add(new RequirementVersion
+        {
+            TenantId = tenantId,
+            WorkRequirementId = wr.Id,
+            Version = 1,
+            ChangeType = "Initial",
+            SourceVersion = wr.SourceVersion,
+            TemplateVersion = wr.TemplateVersion,
+            SnapshotJson = JsonSerializer.Serialize(RequirementResolutionService.ToRequirementSet(wr), RequirementResolutionService.JsonOptions),
+        });
+
+        outbox.Enqueue(db, tenantId, "WorkRequirementCreated", "WorkRequirement", wr.Id,
+            new WorkRequirementCreatedEvent(wr.Id, tenantId, wr.SourceType, wr.SourceId, Guid.NewGuid()));
+        outbox.Enqueue(db, tenantId, "WorkRequirementResolved", "WorkRequirement", wr.Id,
+            new WorkRequirementResolvedEvent(wr.Id, tenantId, wr.SourceType, wr.SourceId, wr.RequirementVersion, wr.WorkType,
+                ["Eligibility", "Capacity", "Scheduling"], Guid.NewGuid()));
+
+        var responseBody = new
+        {
+            workRequirementId = wr.Id,
+            requirementVersion = wr.RequirementVersion,
+            templateCode = template.Code,
+            templateVersion = activeVersion.Version,
+            status = wr.Status.ToString(),
+            warnings,
         };
 
-        db.WorkRequirements.Add(workRequirement);
-        await db.SaveChangesAsync();
+        db.WorkRequirementIdempotencyRecords.Add(new WorkRequirementIdempotencyRecord
+        {
+            TenantId = tenantId,
+            IdempotencyKey = idempotencyKey,
+            RequestHash = requestHash,
+            Operation = "resolve",
+            ResourceId = wr.Id,
+            ResponseBodyJson = JsonSerializer.Serialize(responseBody, RequirementResolutionService.JsonOptions),
+        });
 
-        await publishEndpoint.Publish(new WorkRequirementCreatedEvent(
-            workRequirement.Id, workRequirement.TenantId, workRequirement.Code, Guid.NewGuid()));
+        try
+        {
+            await db.SaveChangesAsync();
+        }
+        catch (DbUpdateException ex) when (ex.IsUniqueViolation())
+        {
+            var winner = await db.WorkRequirementIdempotencyRecords.AsNoTracking()
+                .FirstOrDefaultAsync(r => r.TenantId == tenantId && r.IdempotencyKey == idempotencyKey && r.Operation == "resolve");
+            if (winner is null)
+            {
+                throw;
+            }
+            return winner.RequestHash != requestHash
+                ? this.IdempotencyConflict(idempotencyKey)
+                : StatusCode(StatusCodes.Status201Created, JsonSerializer.Deserialize<JsonElement>(winner.ResponseBodyJson));
+        }
 
-        return CreatedAtAction(nameof(GetById), new { id = workRequirement.Id }, workRequirement);
+        return StatusCode(StatusCodes.Status201Created, responseBody);
     }
 
     [HttpGet("{id:guid}")]
     [RequirePermission(EswmpPermissions.WorkRequirementRead)]
     public async Task<IActionResult> GetById(Guid id)
     {
-        var workRequirement = await db.WorkRequirements
-            .Include(w => w.Versions).ThenInclude(v => v.LocationConstraints)
-            .Include(w => w.Versions).ThenInclude(v => v.ResourceRequirements).ThenInclude(rr => rr.CapabilityRequirements)
-            .Include(w => w.Versions).ThenInclude(v => v.ResourceRequirements).ThenInclude(rr => rr.SkillRequirements)
-            .Include(w => w.Versions).ThenInclude(v => v.ResourceRequirements).ThenInclude(rr => rr.CertificationRequirements)
-            .AsSplitQuery()
-            .FirstOrDefaultAsync(w => w.Id == id);
+        var wr = await db.WorkRequirements.FirstOrDefaultAsync(w => w.Id == id);
+        if (wr is null)
+        {
+            return this.NotFoundError($"No work requirement '{id}' was found.");
+        }
 
-        return workRequirement is null ? NotFound() : Ok(workRequirement);
+        return Ok(await ToWorkRequirementDto(wr));
     }
 
-    [HttpPost("search")]
+    [HttpGet("{id:guid}/versions/{version:int}")]
     [RequirePermission(EswmpPermissions.WorkRequirementRead)]
-    public async Task<IActionResult> Search(WorkRequirementSearchRequest request)
+    public async Task<IActionResult> GetVersion(Guid id, int version)
     {
-        var page = request.Page <= 0 ? 1 : request.Page;
-        var pageSize = request.PageSize <= 0 ? 20 : request.PageSize;
-
-        var query = db.WorkRequirements.AsQueryable();
-
-        if (request.Status is not null)
-            query = query.Where(w => w.Status == request.Status);
-        if (!string.IsNullOrWhiteSpace(request.Category))
-            query = query.Where(w => w.Category == request.Category);
-
-        var totalCount = await query.CountAsync();
-        var items = await query
-            .OrderByDescending(w => w.CreatedAt)
-            .Skip((page - 1) * pageSize)
-            .Take(pageSize)
-            .ToListAsync();
-
-        return Ok(new PagedResult<WorkRequirement>
+        var exists = await db.WorkRequirements.AnyAsync(w => w.Id == id);
+        if (!exists)
         {
-            Items = items,
-            Page = page,
-            PageSize = pageSize,
-            TotalCount = totalCount,
+            return this.NotFoundError($"No work requirement '{id}' was found.");
+        }
+
+        var snapshot = await db.RequirementVersions.FirstOrDefaultAsync(v => v.WorkRequirementId == id && v.Version == version);
+        if (snapshot is null)
+        {
+            return this.NotFoundError($"No version {version} was found for work requirement '{id}'.");
+        }
+
+        return Ok(new
+        {
+            workRequirementId = id,
+            requirementVersion = snapshot.Version,
+            changeType = snapshot.ChangeType,
+            changeReason = snapshot.ChangeReason,
+            sourceVersion = snapshot.SourceVersion,
+            templateVersion = snapshot.TemplateVersion,
+            createdAt = snapshot.CreatedAt,
+            resolved = JsonSerializer.Deserialize<JsonElement>(snapshot.SnapshotJson),
         });
     }
 
-    [HttpPost("{id:guid}/versions")]
-    [RequirePermission(EswmpPermissions.WorkRequirementWrite)]
-    public async Task<IActionResult> CreateVersion(Guid id, RequirementVersionRequest request)
-    {
-        var workRequirement = await db.WorkRequirements.FirstOrDefaultAsync(w => w.Id == id);
-        if (workRequirement is null)
-            return NotFound();
-
-        var versionNumber = workRequirement.CurrentVersionNumber + 1;
-
-        var version = new RequirementVersion
-        {
-            TenantId = workRequirement.TenantId,
-            WorkRequirementId = workRequirement.Id,
-            VersionNumber = versionNumber,
-            Status = RequirementVersionStatus.Draft,
-            ChangeSummary = request.ChangeSummary,
-            EffectiveFrom = request.EffectiveFrom,
-            EffectiveTo = request.EffectiveTo,
-            DurationType = request.DurationType,
-            FixedDurationMinutes = request.FixedDurationMinutes,
-            MinimumDurationMinutes = request.MinimumDurationMinutes,
-            ExpectedDurationMinutes = request.ExpectedDurationMinutes,
-            MaximumDurationMinutes = request.MaximumDurationMinutes,
-            PreWorkBufferMinutes = request.PreWorkBufferMinutes,
-            PostWorkBufferMinutes = request.PostWorkBufferMinutes,
-        };
-
-        MapResourceRequirements(version, request.ResourceRequirements);
-        MapLocationConstraints(version, request.LocationConstraints);
-
-        db.RequirementVersions.Add(version);
-        workRequirement.CurrentVersionNumber = versionNumber;
-
-        await db.SaveChangesAsync();
-
-        return CreatedAtAction(nameof(GetVersion), new { id = workRequirement.Id, versionNumber }, version);
-    }
-
-    [HttpGet("{id:guid}/versions/{versionNumber:int}")]
+    [HttpGet("{id:guid}/resolved")]
     [RequirePermission(EswmpPermissions.WorkRequirementRead)]
-    public async Task<IActionResult> GetVersion(Guid id, int versionNumber)
+    public async Task<IActionResult> GetResolved(Guid id)
     {
-        var version = await LoadFullVersion(id, versionNumber);
-        return version is null ? NotFound() : Ok(version);
+        var wr = await LoadFull(id);
+        if (wr is null)
+        {
+            return this.NotFoundError($"No work requirement '{id}' was found.");
+        }
+
+        if (wr.Status == WorkRequirementStatus.Invalid)
+        {
+            return this.StatusConflict("This work requirement is Invalid and cannot be read as a resolved contract.");
+        }
+
+        var set = RequirementResolutionService.ToRequirementSet(wr);
+        return Ok(new
+        {
+            workRequirementId = wr.Id,
+            requirementVersion = wr.RequirementVersion,
+            workType = wr.WorkType,
+            set.ResourceRequirements,
+            set.CapabilityRequirements,
+            set.CertificationRequirements,
+            set.CapacityRequirements,
+            set.DurationRequirement,
+            set.TimeRequirement,
+            set.LocationRequirement,
+            set.ExecutionRequirement,
+            set.TravelRequirement,
+            set.BufferRequirements,
+            set.DependencyRequirements,
+            set.Constraints,
+            set.Preferences,
+        });
     }
 
-    [HttpPatch("{id:guid}/versions/{versionNumber:int}")]
-    [RequirePermission(EswmpPermissions.WorkRequirementWrite)]
-    public async Task<IActionResult> UpdateVersion(Guid id, int versionNumber, RequirementVersionRequest request)
+    [HttpPost("{id:guid}/validate")]
+    [RequirePermission(EswmpPermissions.WorkRequirementValidate)]
+    public async Task<IActionResult> Validate(Guid id)
     {
-        var version = await LoadFullVersion(id, versionNumber);
-        if (version is null)
-            return NotFound();
-
-        if (version.Status != RequirementVersionStatus.Draft)
+        var wr = await LoadFull(id);
+        if (wr is null)
         {
-            return Conflict(new { error = $"Version {versionNumber} is {version.Status}; only Draft versions may be edited." });
+            return this.NotFoundError($"No work requirement '{id}' was found.");
         }
 
-        version.ChangeSummary = request.ChangeSummary;
-        version.EffectiveFrom = request.EffectiveFrom;
-        version.EffectiveTo = request.EffectiveTo;
-        version.DurationType = request.DurationType;
-        version.FixedDurationMinutes = request.FixedDurationMinutes;
-        version.MinimumDurationMinutes = request.MinimumDurationMinutes;
-        version.ExpectedDurationMinutes = request.ExpectedDurationMinutes;
-        version.MaximumDurationMinutes = request.MaximumDurationMinutes;
-        version.PreWorkBufferMinutes = request.PreWorkBufferMinutes;
-        version.PostWorkBufferMinutes = request.PostWorkBufferMinutes;
+        var issues = RequirementValidationService.Evaluate(wr);
+        var errors = issues.Where(i => i.Severity == "Error").Select(i => new RequirementIssueDto(i.Path, i.Code, i.Severity, i.Message)).ToList();
+        var warnings = issues.Where(i => i.Severity == "Warning").Select(i => new RequirementIssueDto(i.Path, i.Code, i.Severity, i.Message)).ToList();
 
-        // Draft edits replace child collections wholesale rather than diffing —
-        // simplest correct behavior while a version is still mutable. Grandchildren
-        // (capability/skill/certification requirements) are removed explicitly and
-        // in order, rather than relying on cascade-delete fixup timing, then the
-        // navigation is replaced with a fresh list — Clear() on the tracked
-        // navigation would instead try to re-null the FK on an entity already
-        // scheduled for deletion.
-        foreach (var resourceRequirement in version.ResourceRequirements)
-        {
-            db.CapabilityRequirements.RemoveRange(resourceRequirement.CapabilityRequirements);
-            db.SkillRequirements.RemoveRange(resourceRequirement.SkillRequirements);
-            db.CertificationRequirements.RemoveRange(resourceRequirement.CertificationRequirements);
-        }
+        wr.Status = errors.Count == 0 ? WorkRequirementStatus.Valid : WorkRequirementStatus.Invalid;
 
-        db.ResourceRequirements.RemoveRange(version.ResourceRequirements);
-        db.LocationConstraints.RemoveRange(version.LocationConstraints);
-        version.ResourceRequirements = [];
-        version.LocationConstraints = [];
-
-        MapResourceRequirements(version, request.ResourceRequirements);
-        MapLocationConstraints(version, request.LocationConstraints);
+        outbox.Enqueue(db, wr.TenantId, errors.Count == 0 ? "WorkRequirementValidated" : "WorkRequirementInvalidated", "WorkRequirement", wr.Id,
+            errors.Count == 0
+                ? new WorkRequirementValidatedEvent(wr.Id, wr.TenantId, wr.RequirementVersion, Guid.NewGuid())
+                : new WorkRequirementInvalidatedEvent(wr.Id, wr.TenantId, wr.RequirementVersion, errors.Select(e => e.Code).ToList(), Guid.NewGuid()));
 
         await db.SaveChangesAsync();
 
-        return Ok(version);
+        return Ok(new { valid = errors.Count == 0, errors, warnings });
     }
 
-    [HttpPost("{id:guid}/versions/{versionNumber:int}/validate")]
-    [RequirePermission(EswmpPermissions.WorkRequirementWrite)]
-    public async Task<IActionResult> ValidateVersion(Guid id, int versionNumber)
+    [HttpPost("{id:guid}/revisions")]
+    [RequirePermission(EswmpPermissions.WorkRequirementRevise)]
+    public async Task<IActionResult> Revise(
+        Guid id,
+        ReviseWorkRequirementRequest request,
+        [FromHeader(Name = "Idempotency-Key")] string? idempotencyKey)
     {
-        var version = await db.RequirementVersions
-            .Include(v => v.ResourceRequirements)
-            .FirstOrDefaultAsync(v => v.WorkRequirementId == id && v.VersionNumber == versionNumber);
-
-        if (version is null)
-            return NotFound();
-
-        var (status, issues) = RunValidation(version);
-
-        if (status == "Valid" && version.Status == RequirementVersionStatus.Draft)
+        if (string.IsNullOrWhiteSpace(idempotencyKey))
         {
-            version.Status = RequirementVersionStatus.Validated;
+            return this.ValidationFailed("The Idempotency-Key header is required.");
+        }
+
+        var tenantId = tenantContext.RequiredTenantId;
+        var requestHash = WorkRequirementControllerExtensions.HashRequest(request);
+
+        var existing = await db.WorkRequirementIdempotencyRecords
+            .FirstOrDefaultAsync(r => r.TenantId == tenantId && r.IdempotencyKey == idempotencyKey && r.Operation == "revise");
+        if (existing is not null)
+        {
+            return existing.RequestHash != requestHash
+                ? this.IdempotencyConflict(idempotencyKey)
+                : StatusCode(StatusCodes.Status201Created, JsonSerializer.Deserialize<JsonElement>(existing.ResponseBodyJson));
+        }
+
+        var wr = await LoadFull(id);
+        if (wr is null)
+        {
+            return this.NotFoundError($"No work requirement '{id}' was found.");
+        }
+
+        if (request.ExpectedVersion != wr.RequirementVersion)
+        {
+            return this.VersionConflict(request.ExpectedVersion, wr.RequirementVersion);
+        }
+
+        if (TerminalStatuses.Contains(wr.Status))
+        {
+            return this.StatusConflict($"Work requirement is {wr.Status} and can no longer be revised.");
+        }
+
+        var changedCategories = new List<string>();
+        if (request.Changes is { ValueKind: JsonValueKind.Object } changesElement)
+        {
+            try
+            {
+                JsonGuard.Validate(changesElement.GetRawText(), "changes");
+            }
+            catch (JsonBoundsExceededException ex)
+            {
+                return this.ErrorResult(StatusCodes.Status413PayloadTooLarge, "PAYLOAD_TOO_LARGE", ex.Message);
+            }
+
+            ApplyRevisionChanges(wr, changesElement, tenantId, changedCategories);
+        }
+
+        var issues = RequirementValidationService.Evaluate(wr);
+        var errors = issues.Where(i => i.Severity == "Error").Select(i => new RequirementIssueDto(i.Path, i.Code, i.Severity, i.Message)).ToList();
+        if (errors.Count > 0)
+        {
+            return this.InvalidWorkRequirement(errors);
+        }
+
+        wr.RequirementVersion++;
+        wr.Status = WorkRequirementStatus.Valid;
+        wr.UpdatedAt = DateTimeOffset.UtcNow;
+
+        // Material = anything a downstream consumer (Eligibility/Capacity/Scheduling) would
+        // need to recalculate for; everything else is a Minor change.
+        var materialCategories = new[] { "resourceRequirements", "capacityRequirements", "durationRequirement", "timeRequirement", "locationRequirement" };
+        var changeType = changedCategories.Any(materialCategories.Contains) ? "Material" : "Minor";
+
+        db.RequirementVersions.Add(new RequirementVersion
+        {
+            TenantId = tenantId,
+            WorkRequirementId = wr.Id,
+            Version = wr.RequirementVersion,
+            ChangeType = changeType,
+            ChangeReason = request.Reason,
+            SourceVersion = wr.SourceVersion,
+            TemplateVersion = wr.TemplateVersion,
+            SnapshotJson = JsonSerializer.Serialize(RequirementResolutionService.ToRequirementSet(wr), RequirementResolutionService.JsonOptions),
+        });
+
+        if (changeType == "Material")
+        {
+            outbox.Enqueue(db, tenantId, "WorkRequirementChanged", "WorkRequirement", wr.Id,
+                new WorkRequirementChangedEvent(
+                    wr.Id, tenantId, wr.RequirementVersion, changedCategories,
+                    wr.ResourceRequirements.Select(r => r.RoleCode).ToList(),
+                    wr.CapacityRequirements.Select(c => c.DimensionCode).Distinct().ToList(),
+                    Guid.NewGuid()));
+        }
+
+        var responseBody = wr;
+        db.WorkRequirementIdempotencyRecords.Add(new WorkRequirementIdempotencyRecord
+        {
+            TenantId = tenantId,
+            IdempotencyKey = idempotencyKey,
+            RequestHash = requestHash,
+            Operation = "revise",
+            ResourceId = wr.Id,
+            ResponseBodyJson = JsonSerializer.Serialize(await ToWorkRequirementDto(wr), RequirementResolutionService.JsonOptions),
+        });
+
+        try
+        {
             await db.SaveChangesAsync();
         }
+        catch (DbUpdateException ex) when (ex.IsUniqueViolation())
+        {
+            var winner = await db.WorkRequirementIdempotencyRecords.AsNoTracking()
+                .FirstOrDefaultAsync(r => r.TenantId == tenantId && r.IdempotencyKey == idempotencyKey && r.Operation == "revise");
+            if (winner is null)
+            {
+                throw;
+            }
+            return winner.RequestHash != requestHash
+                ? this.IdempotencyConflict(idempotencyKey)
+                : StatusCode(StatusCodes.Status201Created, JsonSerializer.Deserialize<JsonElement>(winner.ResponseBodyJson));
+        }
 
-        return Ok(new { Status = status, Issues = issues });
+        return StatusCode(StatusCodes.Status201Created, await ToWorkRequirementDto(responseBody));
     }
 
-    [HttpPost("{id:guid}/versions/{versionNumber:int}/activate")]
-    [RequirePermission(EswmpPermissions.WorkRequirementWrite)]
-    public async Task<IActionResult> ActivateVersion(Guid id, int versionNumber, ActivateVersionRequest request)
+    [HttpGet("{id:guid}/compare")]
+    [RequirePermission(EswmpPermissions.WorkRequirementRead)]
+    public async Task<IActionResult> Compare(Guid id, [FromQuery] int fromVersion, [FromQuery] int toVersion)
     {
-        var workRequirement = await db.WorkRequirements.FirstOrDefaultAsync(w => w.Id == id);
-        if (workRequirement is null)
-            return NotFound();
-
-        if (request.ExpectedVersion != workRequirement.ConcurrencyVersion)
+        var from = await db.RequirementVersions.FirstOrDefaultAsync(v => v.WorkRequirementId == id && v.Version == fromVersion);
+        var to = await db.RequirementVersions.FirstOrDefaultAsync(v => v.WorkRequirementId == id && v.Version == toVersion);
+        if (from is null || to is null)
         {
-            return StatusCode(StatusCodes.Status412PreconditionFailed, new
+            return this.NotFoundError($"Version {(from is null ? fromVersion : toVersion)} was not found for work requirement '{id}'.");
+        }
+
+        using var fromDoc = JsonDocument.Parse(from.SnapshotJson);
+        using var toDoc = JsonDocument.Parse(to.SnapshotJson);
+
+        var changedCategories = new List<string>();
+        var details = new Dictionary<string, object>();
+        foreach (var property in toDoc.RootElement.EnumerateObject())
+        {
+            var beforeText = fromDoc.RootElement.TryGetProperty(property.Name, out var beforeValue) ? beforeValue.GetRawText() : "null";
+            var afterText = property.Value.GetRawText();
+            if (beforeText != afterText)
             {
-                error = $"Expected version {request.ExpectedVersion} does not match current version {workRequirement.ConcurrencyVersion}."
+                changedCategories.Add(property.Name);
+                details[property.Name] = new { before = JsonSerializer.Deserialize<JsonElement>(beforeText), after = JsonSerializer.Deserialize<JsonElement>(afterText) };
+            }
+        }
+
+        return Ok(new
+        {
+            workRequirementId = id,
+            fromVersion,
+            toVersion,
+            changedCategories,
+            details,
+        });
+    }
+
+    [HttpGet("{id:guid}/explain")]
+    [RequirePermission(EswmpPermissions.WorkRequirementExplain)]
+    public async Task<IActionResult> Explain(Guid id)
+    {
+        var wr = await LoadFull(id);
+        if (wr is null)
+        {
+            return this.NotFoundError($"No work requirement '{id}' was found.");
+        }
+
+        var templateLabel = wr.TemplateId is null ? null : await db.RequirementTemplates
+            .Where(t => t.Id == wr.TemplateId)
+            .Select(t => t.Code)
+            .FirstOrDefaultAsync();
+
+        var derived = new List<object>();
+        foreach (var capacity in wr.CapacityRequirements)
+        {
+            derived.Add(new
+            {
+                requirement = $"{capacity.DimensionCode} = {capacity.Quantity}",
+                source = templateLabel is null ? "Resolution input" : $"Template {templateLabel} version {wr.TemplateVersion} (or a resolution/revision input override)",
+            });
+        }
+        foreach (var role in wr.ResourceRequirements)
+        {
+            derived.Add(new
+            {
+                requirement = role.RoleCode,
+                source = templateLabel is null ? "Resolution input" : $"Template {templateLabel} version {wr.TemplateVersion}",
             });
         }
 
-        var version = await db.RequirementVersions
-            .Include(v => v.ResourceRequirements)
-            .FirstOrDefaultAsync(v => v.WorkRequirementId == id && v.VersionNumber == versionNumber);
-
-        if (version is null)
-            return NotFound();
-
-        if (version.Status != RequirementVersionStatus.Draft && version.Status != RequirementVersionStatus.Validated)
+        var roleSummary = wr.ResourceRequirements.Count switch
         {
-            return Conflict(new { error = $"Version {versionNumber} is {version.Status}; only Draft or Validated versions may be activated." });
-        }
-
-        if (version.Status == RequirementVersionStatus.Draft)
-        {
-            var (status, issues) = RunValidation(version);
-            if (status != "Valid")
-            {
-                return UnprocessableEntity(new { Status = status, Issues = issues });
-            }
-        }
-
-        if (workRequirement.ActiveVersionNumber is not null)
-        {
-            var priorActive = await db.RequirementVersions.FirstOrDefaultAsync(
-                v => v.WorkRequirementId == id && v.VersionNumber == workRequirement.ActiveVersionNumber);
-            if (priorActive is not null)
-            {
-                priorActive.Status = RequirementVersionStatus.Superseded;
-            }
-        }
-
-        version.Status = RequirementVersionStatus.Active;
-        workRequirement.ActiveVersionNumber = versionNumber;
-        workRequirement.Status = WorkRequirementStatus.Active;
-        workRequirement.ConcurrencyVersion++;
-
-        await db.SaveChangesAsync();
-
-        await publishEndpoint.Publish(new RequirementVersionActivatedEvent(
-            workRequirement.Id, versionNumber, workRequirement.TenantId, Guid.NewGuid()));
-
-        return Ok(version);
-    }
-
-    [HttpPost("{id:guid}/retire")]
-    [RequirePermission(EswmpPermissions.WorkRequirementWrite)]
-    public async Task<IActionResult> Retire(Guid id)
-    {
-        var workRequirement = await db.WorkRequirements.FirstOrDefaultAsync(w => w.Id == id);
-        if (workRequirement is null)
-            return NotFound();
-
-        if (workRequirement.Status == WorkRequirementStatus.Retired)
-        {
-            return Conflict(new { error = "WorkRequirement is already Retired." });
-        }
-
-        workRequirement.Status = WorkRequirementStatus.Retired;
-        workRequirement.ConcurrencyVersion++;
-
-        if (workRequirement.ActiveVersionNumber is not null)
-        {
-            var activeVersion = await db.RequirementVersions.FirstOrDefaultAsync(
-                v => v.WorkRequirementId == id && v.VersionNumber == workRequirement.ActiveVersionNumber);
-            if (activeVersion is not null)
-            {
-                activeVersion.Status = RequirementVersionStatus.Retired;
-            }
-        }
-
-        await db.SaveChangesAsync();
-
-        return Ok(workRequirement);
-    }
-
-    [HttpPost("{id:guid}/snapshots")]
-    [RequirePermission(EswmpPermissions.WorkRequirementWrite)]
-    public async Task<IActionResult> CreateSnapshot(Guid id, CreateSnapshotRequest request)
-    {
-        var version = await LoadFullVersion(id, request.VersionNumber);
-        if (version is null)
-            return NotFound();
-
-        var snapshot = new RequirementSnapshot
-        {
-            TenantId = version.TenantId,
-            SourceRequirementId = id,
-            SourceVersionNumber = request.VersionNumber,
-            Reason = request.Reason,
-            DefinitionJson = JsonSerializer.Serialize(version),
+            0 => "No resource roles are defined.",
+            1 => $"One {wr.ResourceRequirements[0].RoleCode} is required" +
+                 (wr.DurationRequirement?.EstimatedDurationMinutes is { } mins ? $" for {mins} minutes" : "") +
+                 (wr.LocationRequirement is not null ? $" at the {wr.LocationRequirement.LocationMode}." : "."),
+            _ => $"{wr.ResourceRequirements.Count} resource roles are required: {string.Join(", ", wr.ResourceRequirements.Select(r => r.RoleCode))}.",
         };
 
-        db.RequirementSnapshots.Add(snapshot);
+        return Ok(new { summary = roleSummary, derivedRequirements = derived });
+    }
+
+    [HttpPost("{id:guid}/cancel")]
+    [RequirePermission(EswmpPermissions.WorkRequirementRevise)]
+    public async Task<IActionResult> Cancel(Guid id)
+    {
+        var wr = await db.WorkRequirements.FirstOrDefaultAsync(w => w.Id == id);
+        if (wr is null)
+        {
+            return this.NotFoundError($"No work requirement '{id}' was found.");
+        }
+
+        if (TerminalStatuses.Contains(wr.Status))
+        {
+            return this.StatusConflict($"Work requirement is {wr.Status} and can no longer be cancelled.");
+        }
+
+        wr.Status = WorkRequirementStatus.Cancelled;
+        wr.UpdatedAt = DateTimeOffset.UtcNow;
+
+        outbox.Enqueue(db, wr.TenantId, "WorkRequirementCancelled", "WorkRequirement", wr.Id,
+            new WorkRequirementCancelledEvent(wr.Id, wr.TenantId, Guid.NewGuid()));
+
         await db.SaveChangesAsync();
 
-        return CreatedAtAction(nameof(GetSnapshot), new { id = snapshot.Id }, snapshot);
+        return Ok(await ToWorkRequirementDto(wr));
     }
 
-    [HttpGet("/api/v1/work-requirement-snapshots/{id:guid}")]
-    [RequirePermission(EswmpPermissions.WorkRequirementRead)]
-    public async Task<IActionResult> GetSnapshot(Guid id)
-    {
-        var snapshot = await db.RequirementSnapshots.FindAsync(id);
-        return snapshot is null ? NotFound() : Ok(snapshot);
-    }
-
-    private async Task<RequirementVersion?> LoadFullVersion(Guid workRequirementId, int versionNumber) =>
-        await db.RequirementVersions
-            .Include(v => v.ResourceRequirements).ThenInclude(rr => rr.CapabilityRequirements)
-            .Include(v => v.ResourceRequirements).ThenInclude(rr => rr.SkillRequirements)
-            .Include(v => v.ResourceRequirements).ThenInclude(rr => rr.CertificationRequirements)
-            .Include(v => v.LocationConstraints)
+    private Task<WorkRequirement?> LoadFull(Guid id) =>
+        db.WorkRequirements
+            .Include(w => w.ResourceRequirements)
+            .Include(w => w.CapabilityRequirements)
+            .Include(w => w.CertificationRequirements)
+            .Include(w => w.CapacityRequirements)
+            .Include(w => w.DurationRequirement)
+            .Include(w => w.TimeRequirement)
+            .Include(w => w.LocationRequirement)
+            .Include(w => w.ExecutionRequirement)
+            .Include(w => w.TravelRequirement)
+            .Include(w => w.BufferRequirements)
+            .Include(w => w.DependencyRequirements)
+            .Include(w => w.Constraints)
+            .Include(w => w.Preferences)
             .AsSplitQuery()
-            .FirstOrDefaultAsync(v => v.WorkRequirementId == workRequirementId && v.VersionNumber == versionNumber);
+            .FirstOrDefaultAsync(w => w.Id == id);
 
-    private static (string Status, List<string> Issues) RunValidation(RequirementVersion version)
+    private async Task<object> ToWorkRequirementDto(WorkRequirement wr)
     {
-        var issues = new List<string>();
+        var templateCode = wr.TemplateId is null ? null : await db.RequirementTemplates
+            .Where(t => t.Id == wr.TemplateId).Select(t => t.Code).FirstOrDefaultAsync();
 
-        if (version.DurationType == DurationType.Fixed)
+        return new
         {
-            if (version.FixedDurationMinutes is null or <= 0)
-            {
-                issues.Add("FixedDurationMinutes must be a positive value when DurationType is Fixed.");
-            }
-        }
-        else
-        {
-            if (version.MinimumDurationMinutes is null || version.ExpectedDurationMinutes is null || version.MaximumDurationMinutes is null)
-            {
-                issues.Add("MinimumDurationMinutes, ExpectedDurationMinutes, and MaximumDurationMinutes are all required when DurationType is Range.");
-            }
-            else if (!(version.MinimumDurationMinutes <= version.ExpectedDurationMinutes &&
-                       version.ExpectedDurationMinutes <= version.MaximumDurationMinutes))
-            {
-                issues.Add("Duration fields must satisfy Minimum <= Expected <= Maximum.");
-            }
-        }
-
-        if (version.ResourceRequirements.Count == 0)
-        {
-            issues.Add("At least one ResourceRequirement is required.");
-        }
-
-        var status = issues.Count == 0 ? "Valid" : "Invalid";
-        return (status, issues);
+            id = wr.Id,
+            tenantId = wr.TenantId,
+            sourceType = wr.SourceType,
+            sourceId = wr.SourceId,
+            sourceVersion = wr.SourceVersion,
+            templateId = wr.TemplateId,
+            templateCode,
+            templateVersion = wr.TemplateVersion,
+            workType = wr.WorkType,
+            workCategory = wr.WorkCategory,
+            serviceMode = wr.ServiceMode,
+            status = wr.Status.ToString(),
+            priority = wr.Priority.ToString(),
+            effectiveFrom = wr.EffectiveFrom,
+            effectiveTo = wr.EffectiveTo,
+            requirementVersion = wr.RequirementVersion,
+            createdAt = wr.CreatedAt,
+            updatedAt = wr.UpdatedAt,
+        };
     }
 
     /// <summary>
-    /// Builds new child entities and stages them with an explicit <c>DbSet.Add</c> rather
-    /// than relying on DetectChanges to infer Added state from graph reachability alone.
-    /// Eswmp.Shared's BaseEntity/TenantScopedEntity pre-populate Id via `Guid.NewGuid()` in
-    /// a property initializer, so every new entity already has a non-default key — when such
-    /// an entity is merely attached to a navigation on an *already-tracked* parent (as in
-    /// UpdateVersion, where `version` was loaded from the database, not freshly `Add()`-ed),
-    /// EF Core's implicit graph-diffing can't tell "new" from "pre-existing with a client-set
-    /// key" and marks it Modified instead of Added, which then fails at SaveChanges time
-    /// because no such row exists yet. Calling Add() directly removes the ambiguity.
+    /// A revision's `changes` payload replaces named categories wholesale when present —
+    /// simple, predictable PATCH semantics rather than per-field diffing. Single-cardinality
+    /// categories (duration/time/location/execution/travel) are replaced outright; list
+    /// categories are replaced outright too, except capacityRequirements, which is merged by
+    /// (roleCode, dimensionCode) so the documented "bump PET_COUNT to 2" example doesn't
+    /// require restating every other capacity dimension.
     /// </summary>
-    private void MapResourceRequirements(RequirementVersion version, List<ResourceRequirementDto> dtos)
+    private static void ApplyRevisionChanges(WorkRequirement wr, JsonElement changes, Guid tenantId, List<string> changedCategories)
     {
-        foreach (var dto in dtos)
+        if (changes.TryGetProperty("resourceRequirements", out var resourceEl))
         {
-            var resourceRequirement = new ResourceRequirement
+            var dtos = JsonSerializer.Deserialize<List<ResourceRoleRequirementDto>>(resourceEl.GetRawText(), RequirementResolutionService.JsonOptions) ?? [];
+            wr.ResourceRequirements.Clear();
+            foreach (var dto in dtos)
             {
-                ResourceTypeCode = dto.ResourceTypeCode,
-                Role = dto.Role,
-                MinimumQuantity = dto.MinimumQuantity,
-                PreferredQuantity = dto.PreferredQuantity,
-                MaximumQuantity = dto.MaximumQuantity,
-                Mandatory = dto.Mandatory,
-            };
-
-            foreach (var capability in dto.Capabilities ?? [])
-            {
-                var capabilityRequirement = new CapabilityRequirement
+                wr.ResourceRequirements.Add(new ResourceRoleRequirement
                 {
-                    CapabilityCode = capability.CapabilityCode,
-                    MinimumLevel = capability.MinimumLevel,
-                    Importance = capability.Importance,
-                };
-                resourceRequirement.CapabilityRequirements.Add(capabilityRequirement);
-                db.CapabilityRequirements.Add(capabilityRequirement);
+                    TenantId = tenantId, WorkRequirementId = wr.Id, RoleCode = dto.RoleCode, ResourceCategory = dto.ResourceCategory,
+                    MinimumQuantity = dto.MinimumQuantity, MaximumQuantity = dto.MaximumQuantity, Required = dto.Required,
+                    SelectionMode = dto.SelectionMode, SameResourceRequired = dto.SameResourceRequired, Sequence = dto.Sequence,
+                });
             }
-
-            foreach (var skill in dto.Skills ?? [])
-            {
-                var skillRequirement = new SkillRequirement
-                {
-                    SkillCode = skill.SkillCode,
-                    MinimumLevel = skill.MinimumLevel,
-                    Mandatory = skill.Mandatory,
-                };
-                resourceRequirement.SkillRequirements.Add(skillRequirement);
-                db.SkillRequirements.Add(skillRequirement);
-            }
-
-            foreach (var certification in dto.Certifications ?? [])
-            {
-                var certificationRequirement = new CertificationRequirement
-                {
-                    CertificationTypeCode = certification.CertificationTypeCode,
-                    Mandatory = certification.Mandatory,
-                };
-                resourceRequirement.CertificationRequirements.Add(certificationRequirement);
-                db.CertificationRequirements.Add(certificationRequirement);
-            }
-
-            version.ResourceRequirements.Add(resourceRequirement);
-            db.ResourceRequirements.Add(resourceRequirement);
+            changedCategories.Add("resourceRequirements");
         }
-    }
 
-    private void MapLocationConstraints(RequirementVersion version, List<LocationConstraintDto>? dtos)
-    {
-        foreach (var dto in dtos ?? [])
+        if (changes.TryGetProperty("capacityRequirements", out var capacityEl))
         {
-            var locationConstraint = new LocationConstraint
+            var dtos = JsonSerializer.Deserialize<List<CapacityRequirementDto>>(capacityEl.GetRawText(), RequirementResolutionService.JsonOptions) ?? [];
+            foreach (var dto in dtos)
             {
-                Mode = dto.Mode,
-                MaximumTravelDistanceKm = dto.MaximumTravelDistanceKm,
-                MaximumTravelTimeMinutes = dto.MaximumTravelTimeMinutes,
-            };
-            version.LocationConstraints.Add(locationConstraint);
-            db.LocationConstraints.Add(locationConstraint);
+                var roleId = dto.RoleCode is null ? (Guid?)null : wr.ResourceRequirements.FirstOrDefault(r => r.RoleCode == dto.RoleCode)?.Id;
+                var match = wr.CapacityRequirements.FirstOrDefault(c => c.DimensionCode == dto.DimensionCode && c.ResourceRoleRequirementId == roleId);
+                if (match is not null)
+                {
+                    match.Quantity = dto.Quantity;
+                    if (dto.Unit is not null) match.Unit = dto.Unit;
+                }
+                else
+                {
+                    wr.CapacityRequirements.Add(new CapacityRequirement
+                    {
+                        TenantId = tenantId, WorkRequirementId = wr.Id, ResourceRoleRequirementId = roleId,
+                        DimensionCode = dto.DimensionCode, Quantity = dto.Quantity, Unit = dto.Unit,
+                        AggregationScope = dto.AggregationScope, Mandatory = dto.Mandatory,
+                    });
+                }
+            }
+            changedCategories.Add("capacityRequirements");
+        }
+
+        if (changes.TryGetProperty("durationRequirement", out var durationEl))
+        {
+            var dto = JsonSerializer.Deserialize<DurationRequirementDto>(durationEl.GetRawText(), RequirementResolutionService.JsonOptions);
+            if (dto is not null)
+            {
+                wr.DurationRequirement ??= new DurationRequirement { TenantId = tenantId, WorkRequirementId = wr.Id, DurationType = dto.DurationType };
+                wr.DurationRequirement.DurationType = dto.DurationType;
+                wr.DurationRequirement.EstimatedDurationMinutes = dto.EstimatedDurationMinutes;
+                wr.DurationRequirement.MinimumDurationMinutes = dto.MinimumDurationMinutes;
+                wr.DurationRequirement.MaximumDurationMinutes = dto.MaximumDurationMinutes;
+                wr.DurationRequirement.SetupDurationMinutes = dto.SetupDurationMinutes;
+                wr.DurationRequirement.CleanupDurationMinutes = dto.CleanupDurationMinutes;
+                changedCategories.Add("durationRequirement");
+            }
+        }
+
+        if (changes.TryGetProperty("timeRequirement", out var timeEl))
+        {
+            var dto = JsonSerializer.Deserialize<TimeRequirementDto>(timeEl.GetRawText(), RequirementResolutionService.JsonOptions);
+            if (dto is not null)
+            {
+                wr.TimeRequirement ??= new TimeRequirement { TenantId = tenantId, WorkRequirementId = wr.Id, TimeConstraintType = dto.TimeConstraintType };
+                wr.TimeRequirement.TimeConstraintType = dto.TimeConstraintType;
+                wr.TimeRequirement.EarliestStart = RequirementResolutionService.ToUtc(dto.EarliestStart);
+                wr.TimeRequirement.LatestStart = RequirementResolutionService.ToUtc(dto.LatestStart);
+                wr.TimeRequirement.EarliestFinish = RequirementResolutionService.ToUtc(dto.EarliestFinish);
+                wr.TimeRequirement.LatestFinish = RequirementResolutionService.ToUtc(dto.LatestFinish);
+                wr.TimeRequirement.FixedStart = RequirementResolutionService.ToUtc(dto.FixedStart);
+                wr.TimeRequirement.FixedEnd = RequirementResolutionService.ToUtc(dto.FixedEnd);
+                wr.TimeRequirement.Deadline = RequirementResolutionService.ToUtc(dto.Deadline);
+                wr.TimeRequirement.Timezone = dto.Timezone;
+                changedCategories.Add("timeRequirement");
+            }
+        }
+
+        if (changes.TryGetProperty("locationRequirement", out var locationEl))
+        {
+            var dto = JsonSerializer.Deserialize<LocationRequirementDto>(locationEl.GetRawText(), RequirementResolutionService.JsonOptions);
+            if (dto is not null)
+            {
+                wr.LocationRequirement ??= new LocationRequirement { TenantId = tenantId, WorkRequirementId = wr.Id, LocationMode = dto.LocationMode };
+                wr.LocationRequirement.LocationMode = dto.LocationMode;
+                wr.LocationRequirement.LocationReferenceType = dto.LocationReferenceType;
+                wr.LocationRequirement.LocationReferenceId = dto.LocationReferenceId;
+                wr.LocationRequirement.Latitude = dto.Latitude;
+                wr.LocationRequirement.Longitude = dto.Longitude;
+                wr.LocationRequirement.ServiceRadius = dto.ServiceRadius;
+                wr.LocationRequirement.LocationFlexibility = dto.LocationFlexibility;
+                changedCategories.Add("locationRequirement");
+            }
         }
     }
 }

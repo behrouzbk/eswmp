@@ -65,7 +65,10 @@ resource "azurerm_postgresql_flexible_server_database" "service_db" {
 }
 
 # ── Redis Cache ───────────────────────────────────────────────────────────────
+# count-gated by var.deploy_redis (default false) — see its description in
+# variables.tf for why this is off by default on a cost-constrained QA credit.
 resource "azurerm_redis_cache" "redis" {
+  count               = var.deploy_redis ? 1 : 0
   name                = "${local.resource_prefix}-redis"
   resource_group_name = azurerm_resource_group.main.name
   location            = azurerm_resource_group.main.location
@@ -84,7 +87,16 @@ resource "azurerm_log_analytics_workspace" "logs" {
   location            = azurerm_resource_group.main.location
   sku                 = "PerGB2018"
   retention_in_days   = 30
-  tags                = local.common_tags
+  # Hard ingestion cap for non-prod — log/trace volume is the easiest cost to
+  # accidentally blow through on a fixed credit (100% OTel sampling is fine for
+  # a QA environment's traffic level, but nothing else bounds what a noisy
+  # container can ship). null (no cap) for prod, where availability of full
+  # logs matters more than a hard stop. Once the cap is hit for the day,
+  # ingestion pauses until the next UTC day — Application Insights/traces
+  # stop arriving, they are not throttled gracefully. Raise this if a real
+  # load/soak test needs more headroom for a day.
+  daily_quota_gb = var.environment == "prod" ? -1 : 1
+  tags           = local.common_tags
 }
 
 resource "azurerm_container_app_environment" "env" {
@@ -177,8 +189,9 @@ resource "azurerm_key_vault_secret" "servicebus_connection" {
 }
 
 resource "azurerm_key_vault_secret" "redis_connection" {
+  count        = var.deploy_redis ? 1 : 0
   name         = "RedisConnection"
-  value        = "${azurerm_redis_cache.redis.hostname}:${azurerm_redis_cache.redis.ssl_port},password=${azurerm_redis_cache.redis.primary_access_key},ssl=True,abortConnect=False"
+  value        = "${azurerm_redis_cache.redis[0].hostname}:${azurerm_redis_cache.redis[0].ssl_port},password=${azurerm_redis_cache.redis[0].primary_access_key},ssl=True,abortConnect=False"
   key_vault_id = azurerm_key_vault.kv.id
   depends_on   = [azurerm_key_vault_access_policy.terraform_operator]
 }
@@ -198,4 +211,62 @@ resource "azurerm_key_vault_secret" "db_connection" {
   value        = each.value
   key_vault_id = azurerm_key_vault.kv.id
   depends_on   = [azurerm_key_vault_access_policy.terraform_operator]
+}
+
+# ── Cost guardrail — Consumption Budget ────────────────────────────────────
+# Alerts only; Azure budgets never block or throttle spend. This is the
+# single most important safety net against a shared, time-boxed credit
+# (see docs/azure/QA-ENVIRONMENT-GUIDE.md for the full cost strategy) —
+# treat a 100% actual-spend alert as "stop and look", not background noise.
+resource "azurerm_consumption_budget_resource_group" "qa_budget" {
+  name              = "${local.resource_prefix}-budget"
+  resource_group_id = azurerm_resource_group.main.id
+
+  amount     = var.monthly_budget_amount
+  time_grain = "Monthly"
+
+  time_period {
+    # Azure requires a start date aligned to the beginning of a month.
+    start_date = formatdate("YYYY-MM-01'T'00:00:00'Z'", timestamp())
+  }
+
+  notification {
+    enabled        = true
+    threshold      = 50
+    operator       = "GreaterThan"
+    threshold_type = "Actual"
+    contact_emails = [var.budget_alert_email]
+  }
+
+  notification {
+    enabled        = true
+    threshold      = 80
+    operator       = "GreaterThan"
+    threshold_type = "Actual"
+    contact_emails = [var.budget_alert_email]
+  }
+
+  notification {
+    enabled        = true
+    threshold      = 100
+    operator       = "GreaterThan"
+    threshold_type = "Actual"
+    contact_emails = [var.budget_alert_email]
+  }
+
+  notification {
+    enabled        = true
+    threshold      = 100
+    operator       = "GreaterThan"
+    threshold_type = "Forecasted"
+    contact_emails = [var.budget_alert_email]
+  }
+
+  lifecycle {
+    # The start_date is computed from timestamp() at apply time — without this,
+    # every subsequent `terraform plan` would show a spurious diff on this
+    # attribute alone (Azure ignores changes to a budget's start_date after
+    # creation for a Monthly grain anyway; it always aligns to month boundaries).
+    ignore_changes = [time_period[0].start_date]
+  }
 }

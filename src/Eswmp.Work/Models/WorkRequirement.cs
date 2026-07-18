@@ -3,153 +3,100 @@ using Eswmp.Shared.DTOs;
 namespace Eswmp.Work.Models;
 
 /// <summary>
-/// See docs/api "Work Requirement #02". A WorkRequirement is the stable, named
-/// definition of "what kind of work this is" (resource/capability/skill/certification
-/// needs, duration, location constraints) — versioned so that in-flight work keeps
-/// referencing the version it was created against even as the definition evolves.
+/// The reconciled Work Requirement Service model — see docs/api/specs/02-work-requirement-model.md
+/// and requirement-schema.sql. The authoritative owner of what must be true for a unit of
+/// work to be performed: it answers what is operationally required, never who performs it,
+/// when it is scheduled, or which candidate is best (§1). It never copies its source Demand;
+/// SourceType/SourceId is the only coupling to Demand Intake (see the provenance note on
+/// Eswmp.Work.Models.RequirementDefinition for the earlier, simpler model this supersedes).
 /// </summary>
 public enum WorkRequirementStatus
 {
     Draft,
-    Active,
-    Inactive,
-    Retired
-}
-
-public enum RequirementVersionStatus
-{
-    Draft,
-    Validated,
-    Active,
+    Validating,
+    Valid,
+    Invalid,
     Superseded,
-    Retired
+    Cancelled,
+    Completed
 }
 
-public enum DurationType
+/// <summary>Mirrors demand.DemandPriority so the domain's priority vocabulary stays one shape.</summary>
+public enum RequirementPriority
 {
-    Fixed,
-    Range
-}
-
-public enum CapabilityImportance
-{
-    Mandatory,
-    Preferred,
-    Optional
-}
-
-public enum LocationConstraintMode
-{
-    FixedLocation,
-    CustomerLocation,
-    ResourceLocation,
-    Virtual,
-    Flexible
-}
-
-public class WorkRequirement : TenantScopedEntity
-{
-    /// <summary>Unique per tenant.</summary>
-    public required string Code { get; set; }
-    public required string Name { get; set; }
-    public string? Description { get; set; }
-    public string? Category { get; set; }
-    public WorkRequirementStatus Status { get; set; } = WorkRequirementStatus.Draft;
-    public int CurrentVersionNumber { get; set; }
-    public int? ActiveVersionNumber { get; set; }
-
-    /// <summary>
-    /// Optimistic-concurrency counter used as `expectedVersion` on version-activate/retire
-    /// commands. Distinct from the domain's own per-version `VersionNumber` sequence.
-    /// </summary>
-    public int ConcurrencyVersion { get; set; } = 1;
-
-    public List<RequirementVersion> Versions { get; set; } = [];
+    Low,
+    Normal,
+    High,
+    Urgent,
+    Critical
 }
 
 /// <summary>
-/// Immutable once Status is Active/Superseded/Retired — the controller rejects PATCH
-/// against any version that isn't still Draft.
+/// requirement.WorkRequirements — aggregate root (model §4.1). Templates generate Work
+/// Requirements; TemplateId/TemplateVersion is frozen provenance so work created under
+/// version 1 never silently becomes version 2.
+/// </summary>
+public class WorkRequirement : TenantScopedEntity
+{
+    /// <summary>Origin kind — 'Demand' today. Open text so a future Service Request
+    /// upstream needs no schema change (model §7.1).</summary>
+    public required string SourceType { get; set; }
+
+    /// <summary>The source object's id (e.g. the Demand id). The source object itself is
+    /// never copied into this schema (model §1.2).</summary>
+    public required string SourceId { get; set; }
+
+    /// <summary>Source.Version at resolution time.</summary>
+    public int? SourceVersion { get; set; }
+
+    public Guid? TemplateId { get; set; }
+    public int? TemplateVersion { get; set; }
+
+    public required string WorkType { get; set; }
+    public string? WorkCategory { get; set; }
+    public string? ServiceMode { get; set; }
+    public string? ComplexityLevel { get; set; }
+
+    public WorkRequirementStatus Status { get; set; } = WorkRequirementStatus.Draft;
+    public RequirementPriority Priority { get; set; } = RequirementPriority.Normal;
+
+    public DateTimeOffset? EffectiveFrom { get; set; }
+    public DateTimeOffset? EffectiveTo { get; set; }
+
+    /// <summary>Optimistic-concurrency counter — supplied as `expectedVersion` on revise (model §4.1, api §11.2).</summary>
+    public int RequirementVersion { get; set; } = 1;
+
+    public List<ResourceRoleRequirement> ResourceRequirements { get; set; } = [];
+    public List<CapabilityRequirement> CapabilityRequirements { get; set; } = [];
+    public List<CertificationRequirement> CertificationRequirements { get; set; } = [];
+    public List<CapacityRequirement> CapacityRequirements { get; set; } = [];
+    public DurationRequirement? DurationRequirement { get; set; }
+    public TimeRequirement? TimeRequirement { get; set; }
+    public LocationRequirement? LocationRequirement { get; set; }
+    public ExecutionRequirement? ExecutionRequirement { get; set; }
+    public TravelRequirement? TravelRequirement { get; set; }
+    public List<BufferRequirement> BufferRequirements { get; set; } = [];
+    public List<DependencyRequirement> DependencyRequirements { get; set; } = [];
+    public List<RequirementConstraint> Constraints { get; set; } = [];
+    public List<RequirementPreference> Preferences { get; set; } = [];
+}
+
+/// <summary>
+/// requirement.RequirementVersions (model §4.7) — one row per revision. SnapshotJson holds
+/// the immutable resolved snapshot at that revision, so GET .../versions/{version} and the
+/// compare endpoint never re-derive history from the live (mutable) aggregate.
 /// </summary>
 public class RequirementVersion : TenantScopedEntity
 {
     public Guid WorkRequirementId { get; set; }
-    public int VersionNumber { get; set; }
-    public RequirementVersionStatus Status { get; set; } = RequirementVersionStatus.Draft;
-    public DateOnly? EffectiveFrom { get; set; }
-    public DateOnly? EffectiveTo { get; set; }
-    public string? ChangeSummary { get; set; }
+    public int Version { get; set; }
 
-    public DurationType DurationType { get; set; }
-    public int? FixedDurationMinutes { get; set; }
-    public int? MinimumDurationMinutes { get; set; }
-    public int? ExpectedDurationMinutes { get; set; }
-    public int? MaximumDurationMinutes { get; set; }
-    public int PreWorkBufferMinutes { get; set; }
-    public int PostWorkBufferMinutes { get; set; }
+    /// <summary>e.g. Material, Minor — whether downstream consumers must recalculate.</summary>
+    public string? ChangeType { get; set; }
+    public string? ChangeReason { get; set; }
+    public int? SourceVersion { get; set; }
+    public int? TemplateVersion { get; set; }
 
-    public List<ResourceRequirement> ResourceRequirements { get; set; } = [];
-    public List<LocationConstraint> LocationConstraints { get; set; } = [];
-}
-
-/// <summary>
-/// A frozen copy of a RequirementVersion (+ its children) at a point in time —
-/// e.g. taken when a Demand is accepted against it, so later edits to the live
-/// version never retroactively change already-accepted work. Immutable once
-/// created; there is no update endpoint.
-/// </summary>
-public class RequirementSnapshot : TenantScopedEntity
-{
-    public Guid SourceRequirementId { get; set; }
-    public int SourceVersionNumber { get; set; }
-
-    /// <summary>jsonb — a serialized copy of the RequirementVersion + its children at freeze time.</summary>
-    public required string DefinitionJson { get; set; }
-    public string? Reason { get; set; }
-}
-
-public class ResourceRequirement : BaseEntity
-{
-    public Guid RequirementVersionId { get; set; }
-    public required string ResourceTypeCode { get; set; }
-    public string? Role { get; set; }
-    public int MinimumQuantity { get; set; }
-    public int PreferredQuantity { get; set; }
-    public int MaximumQuantity { get; set; }
-    public bool Mandatory { get; set; }
-
-    public List<CapabilityRequirement> CapabilityRequirements { get; set; } = [];
-    public List<SkillRequirement> SkillRequirements { get; set; } = [];
-    public List<CertificationRequirement> CertificationRequirements { get; set; } = [];
-}
-
-public class CapabilityRequirement : BaseEntity
-{
-    public Guid ResourceRequirementId { get; set; }
-    public required string CapabilityCode { get; set; }
-    public int? MinimumLevel { get; set; }
-    public CapabilityImportance Importance { get; set; } = CapabilityImportance.Preferred;
-}
-
-public class SkillRequirement : BaseEntity
-{
-    public Guid ResourceRequirementId { get; set; }
-    public required string SkillCode { get; set; }
-    public int? MinimumLevel { get; set; }
-    public bool Mandatory { get; set; }
-}
-
-public class CertificationRequirement : BaseEntity
-{
-    public Guid ResourceRequirementId { get; set; }
-    public required string CertificationTypeCode { get; set; }
-    public bool Mandatory { get; set; }
-}
-
-public class LocationConstraint : BaseEntity
-{
-    public Guid RequirementVersionId { get; set; }
-    public LocationConstraintMode Mode { get; set; }
-    public decimal? MaximumTravelDistanceKm { get; set; }
-    public int? MaximumTravelTimeMinutes { get; set; }
+    /// <summary>jsonb — the immutable resolved requirement contract (§3.2) as of this version.</summary>
+    public required string SnapshotJson { get; set; }
 }

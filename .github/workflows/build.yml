@@ -5,6 +5,10 @@ on:
     branches: [main, develop]
   pull_request:
     branches: [main, develop]
+  # Lets deploy-qa.yml (docs/azure/QA-ENVIRONMENT-GUIDE.md) call this workflow
+  # directly as its build-and-test gate, instead of duplicating these steps or
+  # relying on two independently-triggered workflows racing each other.
+  workflow_call:
 
 env:
   DOTNET_VERSION: '9.0.x'
@@ -36,6 +40,7 @@ jobs:
         run: |
           PGPASSWORD=Eswmp_CI_2024! psql -h localhost -U eswmp -d eswmp_core -c "CREATE DATABASE eswmp_assignment;"
           PGPASSWORD=Eswmp_CI_2024! psql -h localhost -U eswmp -d eswmp_core -c "CREATE DATABASE eswmp_rules;"
+          PGPASSWORD=Eswmp_CI_2024! psql -h localhost -U eswmp -d eswmp_core -c "CREATE DATABASE eswmp_work;"
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
@@ -48,10 +53,14 @@ jobs:
       - name: Build
         run: dotnet build Eswmp.sln --no-restore -c Release
 
+      # Eswmp.Rules has no unit test project yet (tracked as a gap, not fixed
+      # here — see docs/DEVELOPMENT_STATUS.md) — nothing to add to this list
+      # until one exists.
       - name: Unit Tests
         run: |
           dotnet test tests/unit/Eswmp.Core.Tests/Eswmp.Core.Tests.csproj --no-build -c Release --logger "trx;LogFileName=core-unit.trx"
           dotnet test tests/unit/Eswmp.Assignment.Tests/Eswmp.Assignment.Tests.csproj --no-build -c Release --logger "trx;LogFileName=assignment-unit.trx"
+          dotnet test tests/unit/Eswmp.Work.Tests/Eswmp.Work.Tests.csproj --no-build -c Release --logger "trx;LogFileName=work-unit.trx"
 
       - name: Upload Test Results
         uses: actions/upload-artifact@v4

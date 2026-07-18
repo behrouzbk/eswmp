@@ -1,7 +1,9 @@
 using Eswmp.Shared.Extensions;
 using Eswmp.Shared.Infrastructure;
 using Eswmp.Shared.Middleware;
+using Eswmp.Work.Consumers;
 using Eswmp.Work.Data;
+using Eswmp.Work.Services;
 using Microsoft.EntityFrameworkCore;
 using Serilog;
 
@@ -25,7 +27,12 @@ builder.Services.AddEswmpAuthentication(builder.Configuration);
 builder.Services.AddEswmpAuthorization();
 
 // ── MassTransit ───────────────────────────────────────────────
-builder.Services.AddEswmpMessageBus(builder.Configuration);
+builder.Services.AddEswmpMessageBus(builder.Configuration, cfg => cfg.AddConsumer<DemandAcceptedConsumer>());
+
+// ── Work Requirement transactional outbox + Demand adapter ─────
+builder.Services.AddScoped<IOutboxPublisher, OutboxPublisher>();
+builder.Services.AddScoped<IDemandRequirementLinkService, DemandRequirementLinkService>();
+builder.Services.AddHostedService<OutboxRelayService>();
 
 // ── OpenTelemetry ─────────────────────────────────────────────
 builder.Services.AddEswmpObservability(builder.Configuration);

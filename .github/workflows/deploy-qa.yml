@@ -1,0 +1,121 @@
+name: Deploy to QA (Azure Container Apps)
+
+# See docs/azure/QA-ENVIRONMENT-GUIDE.md for the one-time setup this workflow
+# depends on: the QA Container Apps environment itself (provisioned by
+# infrastructure/terraform/, not by this workflow), the AZURE_CLIENT_ID /
+# AZURE_TENANT_ID / AZURE_SUBSCRIPTION_ID repository secrets, and the Entra ID
+# federated identity credential that lets azure/login authenticate with none
+# of those secrets being an actual password. This workflow only builds images
+# and points existing Container Apps at them — it never runs `terraform
+# apply`, so it can never resize/reprovision the environment, only redeploy
+# what's already there.
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [main]
+
+# id-token: write is what lets azure/login request an OIDC token from GitHub
+# and exchange it for an Azure access token — the whole point of federated
+# credentials over a stored client secret.
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  # Must match infrastructure/terraform/staging.tfvars' project/environment —
+  # eswmp-<environment>-rg and eswmp<environment>acr are what Terraform names
+  # them (see main.tf's local.resource_prefix).
+  AZURE_RESOURCE_GROUP: eswmp-staging-rg
+  ACR_NAME: eswmpstagingacr
+  ENVIRONMENT_SUFFIX: staging
+
+jobs:
+  build-and-test:
+    name: Build & Test (gate)
+    uses: ./.github/workflows/build.yml
+
+  build-and-push-images:
+    name: Build & Push Images
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [gateway, core, assignment, rules, work]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure login (OIDC — no client secret)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: ACR login
+        run: az acr login --name "${{ env.ACR_NAME }}"
+
+      - name: Build and push
+        shell: bash
+        run: |
+          set -euo pipefail
+          SERVICE="${{ matrix.service }}"
+          PASCAL="${SERVICE^}"
+          IMAGE="${{ env.ACR_NAME }}.azurecr.io/eswmp-$SERVICE"
+          docker build -f "src/Eswmp.$PASCAL/Dockerfile" \
+            -t "$IMAGE:${{ github.sha }}" \
+            -t "$IMAGE:latest" \
+            .
+          docker push "$IMAGE:${{ github.sha }}"
+          docker push "$IMAGE:latest"
+
+  deploy:
+    name: Deploy to Container Apps
+    needs: build-and-push-images
+    runs-on: ubuntu-latest
+    strategy:
+      # Sequential, not parallel — az containerapp update against the same
+      # Container Apps environment/resource group from 5 concurrent jobs has
+      # no benefit here (deploys are fast) and only adds a chance of a
+      # transient Azure Resource Manager throttling error.
+      max-parallel: 1
+      matrix:
+        service: [gateway, core, assignment, rules, work]
+    steps:
+      - name: Azure login (OIDC — no client secret)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Update Container App image
+        shell: bash
+        run: |
+          set -euo pipefail
+          SERVICE="${{ matrix.service }}"
+          az containerapp update \
+            --name "eswmp-$SERVICE-${{ env.ENVIRONMENT_SUFFIX }}" \
+            --resource-group "${{ env.AZURE_RESOURCE_GROUP }}" \
+            --image "${{ env.ACR_NAME }}.azurecr.io/eswmp-$SERVICE:${{ github.sha }}"
+
+      - name: Wait for the new revision to become healthy
+        shell: bash
+        run: |
+          set -euo pipefail
+          SERVICE="${{ matrix.service }}"
+          for i in $(seq 1 12); do
+            STATE=$(az containerapp revision list \
+              --name "eswmp-$SERVICE-${{ env.ENVIRONMENT_SUFFIX }}" \
+              --resource-group "${{ env.AZURE_RESOURCE_GROUP }}" \
+              --query "[?properties.active].properties.healthState | [0]" -o tsv)
+            if [ "$STATE" = "Healthy" ]; then
+              echo "$SERVICE revision is Healthy"
+              exit 0
+            fi
+            echo "Waiting for $SERVICE revision to become Healthy (attempt $i, currently: $STATE)"
+            sleep 10
+          done
+          echo "::error::$SERVICE did not report Healthy within 2 minutes — check 'az containerapp logs show'"
+          exit 1

@@ -99,7 +99,7 @@ resource "azurerm_container_app" "services" {
   }
 
   dynamic "secret" {
-    for_each = each.value.needs_redis ? { "redis-connection" = azurerm_key_vault_secret.redis_connection.versionless_id } : {}
+    for_each = (each.value.needs_redis && var.deploy_redis) ? { "redis-connection" = azurerm_key_vault_secret.redis_connection[0].versionless_id } : {}
     content {
       name                = secret.key
       key_vault_secret_id = secret.value
@@ -108,7 +108,12 @@ resource "azurerm_container_app" "services" {
   }
 
   template {
-    min_replicas = 1
+    # Consumption plan (the default here — no workload_profile set) supports
+    # true scale-to-zero. A QA environment used intermittently during work
+    # hours has no reason to bill for 5 idle containers 24/7 — prod is the
+    # one tier where a cold start on the first request of the day is
+    # unacceptable, so it alone keeps a warm replica.
+    min_replicas = var.environment == "prod" ? 1 : 0
     max_replicas = 5
 
     container {
@@ -164,7 +169,7 @@ resource "azurerm_container_app" "services" {
       }
 
       dynamic "env" {
-        for_each = each.value.needs_redis ? { "Redis__ConnectionString" = "redis-connection" } : {}
+        for_each = (each.value.needs_redis && var.deploy_redis) ? { "Redis__ConnectionString" = "redis-connection" } : {}
         content {
           name        = env.key
           secret_name = env.value

@@ -12,15 +12,37 @@ public class WorkDbContext(DbContextOptions<WorkDbContext> options, ITenantConte
     public DbSet<DemandValidationResult> DemandValidationResults => Set<DemandValidationResult>();
     public DbSet<DemandIdempotencyRecord> DemandIdempotencyRecords => Set<DemandIdempotencyRecord>();
 
-    // Work Requirement module
+    // Requirement Definition module (first-generation Work Requirement model — see the
+    // provenance note on Eswmp.Work.Models.RequirementDefinition)
+    public DbSet<RequirementDefinition> RequirementDefinitions => Set<RequirementDefinition>();
+    public DbSet<RequirementDefinitionVersion> RequirementDefinitionVersions => Set<RequirementDefinitionVersion>();
+    public DbSet<RequirementDefinitionSnapshot> RequirementDefinitionSnapshots => Set<RequirementDefinitionSnapshot>();
+    public DbSet<DefinitionResourceRequirement> DefinitionResourceRequirements => Set<DefinitionResourceRequirement>();
+    public DbSet<DefinitionCapabilityRequirement> DefinitionCapabilityRequirements => Set<DefinitionCapabilityRequirement>();
+    public DbSet<DefinitionSkillRequirement> DefinitionSkillRequirements => Set<DefinitionSkillRequirement>();
+    public DbSet<DefinitionCertificationRequirement> DefinitionCertificationRequirements => Set<DefinitionCertificationRequirement>();
+    public DbSet<LocationConstraint> LocationConstraints => Set<LocationConstraint>();
+
+    // Work Requirement module (reconciled model — schema "requirement")
+    public DbSet<RequirementTemplate> RequirementTemplates => Set<RequirementTemplate>();
+    public DbSet<RequirementTemplateVersion> RequirementTemplateVersions => Set<RequirementTemplateVersion>();
     public DbSet<WorkRequirement> WorkRequirements => Set<WorkRequirement>();
     public DbSet<RequirementVersion> RequirementVersions => Set<RequirementVersion>();
-    public DbSet<RequirementSnapshot> RequirementSnapshots => Set<RequirementSnapshot>();
-    public DbSet<ResourceRequirement> ResourceRequirements => Set<ResourceRequirement>();
+    public DbSet<ResourceRoleRequirement> ResourceRoleRequirements => Set<ResourceRoleRequirement>();
     public DbSet<CapabilityRequirement> CapabilityRequirements => Set<CapabilityRequirement>();
-    public DbSet<SkillRequirement> SkillRequirements => Set<SkillRequirement>();
     public DbSet<CertificationRequirement> CertificationRequirements => Set<CertificationRequirement>();
-    public DbSet<LocationConstraint> LocationConstraints => Set<LocationConstraint>();
+    public DbSet<CapacityRequirement> CapacityRequirements => Set<CapacityRequirement>();
+    public DbSet<DurationRequirement> DurationRequirements => Set<DurationRequirement>();
+    public DbSet<TimeRequirement> TimeRequirements => Set<TimeRequirement>();
+    public DbSet<LocationRequirement> LocationRequirements => Set<LocationRequirement>();
+    public DbSet<ExecutionRequirement> ExecutionRequirements => Set<ExecutionRequirement>();
+    public DbSet<TravelRequirement> TravelRequirements => Set<TravelRequirement>();
+    public DbSet<BufferRequirement> BufferRequirements => Set<BufferRequirement>();
+    public DbSet<DependencyRequirement> DependencyRequirements => Set<DependencyRequirement>();
+    public DbSet<RequirementConstraint> Constraints => Set<RequirementConstraint>();
+    public DbSet<RequirementPreference> Preferences => Set<RequirementPreference>();
+    public DbSet<WorkRequirementIdempotencyRecord> WorkRequirementIdempotencyRecords => Set<WorkRequirementIdempotencyRecord>();
+    public DbSet<WorkRequirementOutboxMessage> WorkRequirementOutboxMessages => Set<WorkRequirementOutboxMessage>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -68,81 +90,278 @@ public class WorkDbContext(DbContextOptions<WorkDbContext> options, ITenantConte
             e.HasOne<Demand>().WithMany().HasForeignKey(x => x.DemandId).OnDelete(DeleteBehavior.Restrict);
         });
 
-        // ── Work Requirement module — schema "requirements" ─────────────
-        modelBuilder.Entity<WorkRequirement>(e =>
+        // ── Requirement Definition module — schema "requirements" ───────
+        // First-generation Work Requirement model; see the provenance note on
+        // Eswmp.Work.Models.RequirementDefinition. Physical schema unchanged (still
+        // "requirements", plural) — only the C# vocabulary and routes moved, to free
+        // "WorkRequirement"/"requirement" (singular) for the reconciled model below.
+        modelBuilder.Entity<RequirementDefinition>(e =>
         {
-            e.ToTable("WorkRequirements", schema: "requirements");
+            e.ToTable("RequirementDefinitions", schema: "requirements");
             e.HasQueryFilter(x => x.TenantId == tenantContext.TenantId);
             e.HasIndex(x => new { x.TenantId, x.Code }).IsUnique();
 
             e.HasMany(x => x.Versions)
                 .WithOne()
-                .HasForeignKey(x => x.WorkRequirementId)
+                .HasForeignKey(x => x.RequirementDefinitionId)
                 .OnDelete(DeleteBehavior.Cascade);
         });
 
-        modelBuilder.Entity<RequirementVersion>(e =>
+        modelBuilder.Entity<RequirementDefinitionVersion>(e =>
         {
-            e.ToTable("RequirementVersions", schema: "requirements");
+            e.ToTable("RequirementDefinitionVersions", schema: "requirements");
             e.HasQueryFilter(x => x.TenantId == tenantContext.TenantId);
-            e.HasIndex(x => new { x.TenantId, x.VersionNumber, x.WorkRequirementId }).IsUnique();
+            e.HasIndex(x => new { x.TenantId, x.VersionNumber, x.RequirementDefinitionId }).IsUnique();
 
             e.HasMany(x => x.ResourceRequirements)
                 .WithOne()
-                .HasForeignKey(x => x.RequirementVersionId)
+                .HasForeignKey(x => x.RequirementDefinitionVersionId)
                 .OnDelete(DeleteBehavior.Cascade);
 
             e.HasMany(x => x.LocationConstraints)
                 .WithOne()
-                .HasForeignKey(x => x.RequirementVersionId)
+                .HasForeignKey(x => x.RequirementDefinitionVersionId)
                 .OnDelete(DeleteBehavior.Cascade);
         });
 
-        modelBuilder.Entity<RequirementSnapshot>(e =>
+        modelBuilder.Entity<RequirementDefinitionSnapshot>(e =>
         {
-            e.ToTable("RequirementSnapshots", schema: "requirements");
+            e.ToTable("RequirementDefinitionSnapshots", schema: "requirements");
             e.HasQueryFilter(x => x.TenantId == tenantContext.TenantId);
             e.Property(x => x.DefinitionJson).HasColumnType("jsonb");
         });
 
-        modelBuilder.Entity<ResourceRequirement>(e =>
+        modelBuilder.Entity<DefinitionResourceRequirement>(e =>
         {
-            e.ToTable("ResourceRequirements", schema: "requirements");
+            e.ToTable("DefinitionResourceRequirements", schema: "requirements");
 
             e.HasMany(x => x.CapabilityRequirements)
                 .WithOne()
-                .HasForeignKey(x => x.ResourceRequirementId)
+                .HasForeignKey(x => x.DefinitionResourceRequirementId)
                 .OnDelete(DeleteBehavior.Cascade);
 
             e.HasMany(x => x.SkillRequirements)
                 .WithOne()
-                .HasForeignKey(x => x.ResourceRequirementId)
+                .HasForeignKey(x => x.DefinitionResourceRequirementId)
                 .OnDelete(DeleteBehavior.Cascade);
 
             e.HasMany(x => x.CertificationRequirements)
                 .WithOne()
-                .HasForeignKey(x => x.ResourceRequirementId)
+                .HasForeignKey(x => x.DefinitionResourceRequirementId)
                 .OnDelete(DeleteBehavior.Cascade);
         });
 
-        modelBuilder.Entity<CapabilityRequirement>(e =>
+        modelBuilder.Entity<DefinitionCapabilityRequirement>(e =>
         {
-            e.ToTable("CapabilityRequirements", schema: "requirements");
+            e.ToTable("DefinitionCapabilityRequirements", schema: "requirements");
         });
 
-        modelBuilder.Entity<SkillRequirement>(e =>
+        modelBuilder.Entity<DefinitionSkillRequirement>(e =>
         {
-            e.ToTable("SkillRequirements", schema: "requirements");
+            e.ToTable("DefinitionSkillRequirements", schema: "requirements");
         });
 
-        modelBuilder.Entity<CertificationRequirement>(e =>
+        modelBuilder.Entity<DefinitionCertificationRequirement>(e =>
         {
-            e.ToTable("CertificationRequirements", schema: "requirements");
+            e.ToTable("DefinitionCertificationRequirements", schema: "requirements");
         });
 
         modelBuilder.Entity<LocationConstraint>(e =>
         {
             e.ToTable("LocationConstraints", schema: "requirements");
+        });
+
+        // ── Work Requirement module — schema "requirement" ──────────────
+        // The reconciled model (docs/api/specs/02-work-requirement-model.md,
+        // requirement-schema.sql). Sibling of the "demand" schema in the same deployable
+        // unit; neither module's code may touch the other's tables (CLAUDE.md rule 11).
+        modelBuilder.Entity<RequirementTemplate>(e =>
+        {
+            e.ToTable("RequirementTemplates", schema: "requirement");
+            e.HasQueryFilter(x => x.TenantId == tenantContext.TenantId);
+            // [SPEC] cross-tenant template use prohibited; code unique per tenant
+            e.HasIndex(x => new { x.TenantId, x.Code }).IsUnique();
+            e.HasIndex(x => new { x.TenantId, x.WorkType, x.Status });
+
+            e.HasMany(x => x.Versions)
+                .WithOne()
+                .HasForeignKey(x => x.TemplateId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<RequirementTemplateVersion>(e =>
+        {
+            e.ToTable("RequirementTemplateVersions", schema: "requirement");
+            e.HasQueryFilter(x => x.TenantId == tenantContext.TenantId);
+            e.Property(x => x.DefinitionJson).HasColumnType("jsonb");
+            e.HasIndex(x => new { x.TemplateId, x.Version }).IsUnique();
+        });
+
+        modelBuilder.Entity<WorkRequirement>(e =>
+        {
+            e.ToTable("WorkRequirements", schema: "requirement");
+            e.HasQueryFilter(x => x.TenantId == tenantContext.TenantId);
+            // The domain join back to Demand Intake — resolve/lookup by originating source.
+            e.HasIndex(x => new { x.TenantId, x.SourceType, x.SourceId });
+            e.HasIndex(x => new { x.TenantId, x.Status, x.CreatedAt });
+            e.HasOne<RequirementTemplate>().WithMany()
+                .HasForeignKey(x => x.TemplateId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            e.HasMany(x => x.ResourceRequirements).WithOne().HasForeignKey(x => x.WorkRequirementId).OnDelete(DeleteBehavior.Cascade);
+            e.HasMany(x => x.CapabilityRequirements).WithOne().HasForeignKey(x => x.WorkRequirementId).OnDelete(DeleteBehavior.Cascade);
+            e.HasMany(x => x.CertificationRequirements).WithOne().HasForeignKey(x => x.WorkRequirementId).OnDelete(DeleteBehavior.Cascade);
+            e.HasMany(x => x.CapacityRequirements).WithOne().HasForeignKey(x => x.WorkRequirementId).OnDelete(DeleteBehavior.Cascade);
+            e.HasOne(x => x.DurationRequirement).WithOne().HasForeignKey<DurationRequirement>(x => x.WorkRequirementId).OnDelete(DeleteBehavior.Cascade);
+            e.HasOne(x => x.TimeRequirement).WithOne().HasForeignKey<TimeRequirement>(x => x.WorkRequirementId).OnDelete(DeleteBehavior.Cascade);
+            e.HasOne(x => x.LocationRequirement).WithOne().HasForeignKey<LocationRequirement>(x => x.WorkRequirementId).OnDelete(DeleteBehavior.Cascade);
+            e.HasOne(x => x.ExecutionRequirement).WithOne().HasForeignKey<ExecutionRequirement>(x => x.WorkRequirementId).OnDelete(DeleteBehavior.Cascade);
+            e.HasOne(x => x.TravelRequirement).WithOne().HasForeignKey<TravelRequirement>(x => x.WorkRequirementId).OnDelete(DeleteBehavior.Cascade);
+            e.HasMany(x => x.BufferRequirements).WithOne().HasForeignKey(x => x.WorkRequirementId).OnDelete(DeleteBehavior.Cascade);
+            e.HasMany(x => x.DependencyRequirements).WithOne().HasForeignKey(x => x.WorkRequirementId).OnDelete(DeleteBehavior.Cascade);
+            e.HasMany(x => x.Constraints).WithOne().HasForeignKey(x => x.WorkRequirementId).OnDelete(DeleteBehavior.Cascade);
+            e.HasMany(x => x.Preferences).WithOne().HasForeignKey(x => x.WorkRequirementId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<RequirementVersion>(e =>
+        {
+            e.ToTable("RequirementVersions", schema: "requirement");
+            e.HasQueryFilter(x => x.TenantId == tenantContext.TenantId);
+            e.Property(x => x.SnapshotJson).HasColumnType("jsonb");
+            e.HasIndex(x => new { x.WorkRequirementId, x.Version }).IsUnique();
+            e.HasOne<WorkRequirement>().WithMany().HasForeignKey(x => x.WorkRequirementId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<ResourceRoleRequirement>(e =>
+        {
+            e.ToTable("ResourceRoleRequirements", schema: "requirement", t => t.HasCheckConstraint(
+                "CK_RRR_Quantity",
+                "\"MinimumQuantity\" > 0 AND (\"MaximumQuantity\" IS NULL OR \"MaximumQuantity\" >= \"MinimumQuantity\")"));
+            e.HasQueryFilter(x => x.TenantId == tenantContext.TenantId);
+            e.HasIndex(x => x.WorkRequirementId);
+        });
+
+        modelBuilder.Entity<CapabilityRequirement>(e =>
+        {
+            e.ToTable("CapabilityRequirements", schema: "requirement");
+            e.HasQueryFilter(x => x.TenantId == tenantContext.TenantId);
+            e.HasIndex(x => x.WorkRequirementId);
+            e.HasOne<ResourceRoleRequirement>().WithMany().HasForeignKey(x => x.ResourceRoleRequirementId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<CertificationRequirement>(e =>
+        {
+            e.ToTable("CertificationRequirements", schema: "requirement");
+            e.HasQueryFilter(x => x.TenantId == tenantContext.TenantId);
+            e.HasIndex(x => x.WorkRequirementId);
+            e.HasOne<ResourceRoleRequirement>().WithMany().HasForeignKey(x => x.ResourceRoleRequirementId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<CapacityRequirement>(e =>
+        {
+            e.ToTable("CapacityRequirements", schema: "requirement", t => t.HasCheckConstraint(
+                "CK_CapaR_Quantity", "\"Quantity\" > 0"));
+            e.HasQueryFilter(x => x.TenantId == tenantContext.TenantId);
+            e.Property(x => x.Quantity).HasColumnType("numeric(18,4)");
+            e.HasIndex(x => x.WorkRequirementId);
+            e.HasOne<ResourceRoleRequirement>().WithMany().HasForeignKey(x => x.ResourceRoleRequirementId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<DurationRequirement>(e =>
+        {
+            e.ToTable("DurationRequirements", schema: "requirement", t => t.HasCheckConstraint(
+                "CK_Dur_Positive",
+                "(\"EstimatedDurationMinutes\" IS NULL OR \"EstimatedDurationMinutes\" > 0) " +
+                "AND (\"MinimumDurationMinutes\" IS NULL OR \"MinimumDurationMinutes\" > 0) " +
+                "AND (\"MaximumDurationMinutes\" IS NULL OR \"MaximumDurationMinutes\" > 0) " +
+                "AND (\"MinimumDurationMinutes\" IS NULL OR \"MaximumDurationMinutes\" IS NULL OR \"MinimumDurationMinutes\" <= \"MaximumDurationMinutes\")"));
+            e.HasQueryFilter(x => x.TenantId == tenantContext.TenantId);
+            e.HasIndex(x => x.WorkRequirementId).IsUnique();
+        });
+
+        modelBuilder.Entity<TimeRequirement>(e =>
+        {
+            e.ToTable("TimeRequirements", schema: "requirement", t => t.HasCheckConstraint(
+                "CK_Time_Ordering",
+                "(\"EarliestStart\" IS NULL OR \"LatestStart\" IS NULL OR \"EarliestStart\" <= \"LatestStart\") " +
+                "AND (\"FixedStart\" IS NULL OR \"FixedEnd\" IS NULL OR \"FixedStart\" < \"FixedEnd\") " +
+                "AND (\"EarliestStart\" IS NULL OR \"Deadline\" IS NULL OR \"EarliestStart\" <= \"Deadline\") " +
+                "AND (\"EarliestStart\" IS NULL OR \"LatestFinish\" IS NULL OR \"EarliestStart\" < \"LatestFinish\")"));
+            e.HasQueryFilter(x => x.TenantId == tenantContext.TenantId);
+            e.HasIndex(x => x.WorkRequirementId).IsUnique();
+        });
+
+        modelBuilder.Entity<LocationRequirement>(e =>
+        {
+            e.ToTable("LocationRequirements", schema: "requirement");
+            e.HasQueryFilter(x => x.TenantId == tenantContext.TenantId);
+            e.Property(x => x.Latitude).HasColumnType("numeric(9,6)");
+            e.Property(x => x.Longitude).HasColumnType("numeric(9,6)");
+            e.Property(x => x.ServiceRadius).HasColumnType("numeric(10,2)");
+            e.HasIndex(x => x.WorkRequirementId).IsUnique();
+        });
+
+        modelBuilder.Entity<ExecutionRequirement>(e =>
+        {
+            e.ToTable("ExecutionRequirements", schema: "requirement");
+            e.HasQueryFilter(x => x.TenantId == tenantContext.TenantId);
+            e.HasIndex(x => x.WorkRequirementId).IsUnique();
+        });
+
+        modelBuilder.Entity<TravelRequirement>(e =>
+        {
+            e.ToTable("TravelRequirements", schema: "requirement");
+            e.HasQueryFilter(x => x.TenantId == tenantContext.TenantId);
+            e.Property(x => x.MaximumTravelDistance).HasColumnType("numeric(10,2)");
+            e.HasIndex(x => x.WorkRequirementId).IsUnique();
+        });
+
+        modelBuilder.Entity<BufferRequirement>(e =>
+        {
+            e.ToTable("BufferRequirements", schema: "requirement", t => t.HasCheckConstraint(
+                "CK_Buf_Positive", "\"DurationMinutes\" > 0"));
+            e.HasQueryFilter(x => x.TenantId == tenantContext.TenantId);
+            e.HasIndex(x => x.WorkRequirementId);
+        });
+
+        modelBuilder.Entity<DependencyRequirement>(e =>
+        {
+            e.ToTable("DependencyRequirements", schema: "requirement");
+            e.HasQueryFilter(x => x.TenantId == tenantContext.TenantId);
+            e.HasIndex(x => x.WorkRequirementId);
+        });
+
+        modelBuilder.Entity<RequirementConstraint>(e =>
+        {
+            e.ToTable("Constraints", schema: "requirement");
+            e.HasQueryFilter(x => x.TenantId == tenantContext.TenantId);
+            e.HasIndex(x => x.WorkRequirementId);
+        });
+
+        modelBuilder.Entity<RequirementPreference>(e =>
+        {
+            e.ToTable("Preferences", schema: "requirement");
+            e.HasQueryFilter(x => x.TenantId == tenantContext.TenantId);
+            e.Property(x => x.Weight).HasColumnType("numeric(5,2)");
+            e.HasIndex(x => x.WorkRequirementId);
+        });
+
+        modelBuilder.Entity<WorkRequirementIdempotencyRecord>(e =>
+        {
+            e.ToTable("IdempotencyRecords", schema: "requirement");
+            e.HasQueryFilter(x => x.TenantId == tenantContext.TenantId);
+            e.Property(x => x.ResponseBodyJson).HasColumnType("jsonb");
+            e.HasIndex(x => new { x.TenantId, x.IdempotencyKey }).IsUnique();
+        });
+
+        modelBuilder.Entity<WorkRequirementOutboxMessage>(e =>
+        {
+            e.ToTable("OutboxMessages", schema: "requirement");
+            // No tenant query filter: the outbox relay runs outside any tenant HTTP request
+            // and must see every tenant's pending messages (mirrors requirement-schema.sql,
+            // which deliberately excludes OutboxMessages from the RLS table list).
+            e.Property(x => x.PayloadJson).HasColumnType("jsonb");
+            e.HasIndex(x => x.OccurredAt).HasFilter("\"ProcessedAt\" IS NULL");
         });
     }
 }

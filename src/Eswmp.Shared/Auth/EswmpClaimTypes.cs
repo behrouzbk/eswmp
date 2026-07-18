@@ -62,9 +62,27 @@ public static class EswmpPermissions
     public const string DemandRead = "demand.read";
     public const string DemandTransition = "demand.transition";
 
-    // Work Requirement
+    // Requirement Definition (first-generation Work Requirement model — see the
+    // provenance note on Eswmp.Work.Models.RequirementDefinition)
+    public const string RequirementDefinitionRead = "requirementdefinition.read";
+    public const string RequirementDefinitionWrite = "requirementdefinition.write";
+
+    // Work Requirement (docs/api/specs/02-work-requirement-api.md §10.2) — finer-grained
+    // than Demand Intake because template authoring, resolution, and revision are
+    // genuinely different authorities.
+    public const string WorkRequirementTemplateCreate = "workrequirement.template.create";
+    public const string WorkRequirementTemplateRead = "workrequirement.template.read";
+    public const string WorkRequirementTemplateUpdate = "workrequirement.template.update";
+    public const string WorkRequirementTemplateActivate = "workrequirement.template.activate";
+    public const string WorkRequirementTemplateRetire = "workrequirement.template.retire";
     public const string WorkRequirementRead = "workrequirement.read";
-    public const string WorkRequirementWrite = "workrequirement.write";
+    public const string WorkRequirementResolve = "workrequirement.resolve";
+    public const string WorkRequirementRevise = "workrequirement.revise";
+    public const string WorkRequirementValidate = "workrequirement.validate";
+    public const string WorkRequirementExplain = "workrequirement.explain";
+    public const string WorkRequirementOverrideRestrict = "workrequirement.override.restrict";
+    public const string WorkRequirementOverrideRelax = "workrequirement.override.relax";
+    public const string WorkRequirementAdmin = "workrequirement.admin";
 
     // Admin
     public const string AdminAll = "admin.all";

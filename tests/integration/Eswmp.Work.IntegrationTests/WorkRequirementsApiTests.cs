@@ -1,17 +1,35 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Text.Json;
 using Eswmp.Shared.Auth;
-using Eswmp.Work.Controllers;
-using Eswmp.Work.Models;
 using FluentAssertions;
 using Xunit;
 
 namespace Eswmp.Work.IntegrationTests;
 
+/// <summary>
+/// Exercises the reconciled Work Requirement model (docs/api/specs/02-work-requirement-api.md)
+/// against a real Postgres via WorkApiFactory/Testcontainers — mirrors DemandsApiTests.cs and
+/// RequirementDefinitionsApiTests.cs conventions. Requires Docker; see WK-07 in TASK_BOARD.md
+/// for this environment's known Testcontainers fragility.
+/// </summary>
 [Collection(WorkApiCollection.Name)]
 public class WorkRequirementsApiTests(WorkApiFactory factory)
 {
+    private static readonly string[] AllTemplatePermissions =
+    [
+        EswmpPermissions.WorkRequirementTemplateCreate,
+        EswmpPermissions.WorkRequirementTemplateRead,
+        EswmpPermissions.WorkRequirementTemplateUpdate,
+        EswmpPermissions.WorkRequirementTemplateActivate,
+        EswmpPermissions.WorkRequirementRead,
+        EswmpPermissions.WorkRequirementResolve,
+        EswmpPermissions.WorkRequirementRevise,
+        EswmpPermissions.WorkRequirementValidate,
+        EswmpPermissions.WorkRequirementExplain,
+    ];
+
     private HttpClient AuthenticatedClient(Guid tenantId, params string[] permissions)
     {
         var client = factory.CreateClient();
@@ -20,109 +38,128 @@ public class WorkRequirementsApiTests(WorkApiFactory factory)
         return client;
     }
 
-    private static CreateWorkRequirementRequest NewRequest(string code) =>
-        new(code, "Integration Test Requirement", "Created by an integration test", "field-service");
+    private static HttpRequestMessage PostWithIdempotencyKey(string url, object body, string idempotencyKey)
+    {
+        var message = new HttpRequestMessage(HttpMethod.Post, url) { Content = JsonContent.Create(body) };
+        message.Headers.Add("Idempotency-Key", idempotencyKey);
+        return message;
+    }
+
+    private static object ValidDefinitions() => new
+    {
+        resourceRequirements = new[] { new { roleCode = "DOG_WALKER", resourceCategory = "Person", minimumQuantity = 1, maximumQuantity = 1 } },
+        durationRequirement = new { durationType = "Fixed", estimatedDurationMinutes = 60 },
+        capabilityRequirements = new[] { new { roleCode = "DOG_WALKER", capabilityCode = "DOG_WALKING", mandatory = true } },
+        capacityRequirements = new[] { new { roleCode = "DOG_WALKER", dimensionCode = "PET_COUNT", quantity = 1, unit = "COUNT" } },
+        locationRequirement = new { locationMode = "CustomerLocation" },
+    };
+
+    private async Task<(Guid TemplateId, string Code)> CreateAndActivateTemplate(HttpClient client, string code)
+    {
+        var createResponse = await client.SendAsync(PostWithIdempotencyKey(
+            "/api/v1/work-requirement-templates",
+            new { code, name = "Standard Dog Walk", workType = "DOG_WALKING" },
+            Guid.NewGuid().ToString()));
+        createResponse.StatusCode.Should().Be(HttpStatusCode.Created);
+        var created = await createResponse.Content.ReadFromJsonAsync<JsonElement>();
+        var templateId = created.GetProperty("id").GetGuid();
+
+        var configureResponse = await client.PutAsJsonAsync(
+            $"/api/v1/work-requirement-templates/{templateId}/versions/1/requirements", ValidDefinitions());
+        configureResponse.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        var activateResponse = await client.PostAsync($"/api/v1/work-requirement-templates/{templateId}/versions/1/activate", null);
+        activateResponse.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        return (templateId, code);
+    }
 
     [Fact]
-    public async Task Create_ThenGetById_RoundTripsThroughRealPostgres()
+    public async Task Resolve_AgainstActiveTemplate_CreatesValidWorkRequirement()
     {
         var tenantId = Guid.NewGuid();
-        var client = AuthenticatedClient(tenantId, EswmpPermissions.WorkRequirementWrite, EswmpPermissions.WorkRequirementRead);
+        var client = AuthenticatedClient(tenantId, AllTemplatePermissions);
+        await CreateAndActivateTemplate(client, "DOG_WALK_STANDARD_1");
 
-        var createResponse = await client.PostAsJsonAsync("/api/v1/work-requirements", NewRequest("WR-ROUNDTRIP"));
-        createResponse.StatusCode.Should().Be(HttpStatusCode.Created);
-        var created = await createResponse.Content.ReadFromJsonAsync<WorkRequirement>(TestJson.Options);
+        var resolveResponse = await client.SendAsync(PostWithIdempotencyKey(
+            "/api/v1/work-requirements/resolve",
+            new { sourceType = "Demand", sourceId = "demand-1", sourceVersion = 1, templateCode = "DOG_WALK_STANDARD_1" },
+            Guid.NewGuid().ToString()));
 
-        var getResponse = await client.GetAsync($"/api/v1/work-requirements/{created!.Id}");
+        resolveResponse.StatusCode.Should().Be(HttpStatusCode.Created);
+        var resolved = await resolveResponse.Content.ReadFromJsonAsync<JsonElement>();
+        resolved.GetProperty("status").GetString().Should().Be("Valid");
 
+        var workRequirementId = resolved.GetProperty("workRequirementId").GetGuid();
+        var getResponse = await client.GetAsync($"/api/v1/work-requirements/{workRequirementId}/resolved");
         getResponse.StatusCode.Should().Be(HttpStatusCode.OK);
-        var fetched = await getResponse.Content.ReadFromJsonAsync<WorkRequirement>(TestJson.Options);
-        fetched!.Id.Should().Be(created.Id);
-        fetched.Code.Should().Be("WR-ROUNDTRIP");
-        fetched.Status.Should().Be(WorkRequirementStatus.Draft);
+        var wire = await getResponse.Content.ReadFromJsonAsync<JsonElement>();
+        wire.GetProperty("resourceRequirements").GetArrayLength().Should().Be(1);
     }
 
     [Fact]
-    public async Task Create_WithoutWorkRequirementWritePermission_ReturnsForbidden()
+    public async Task Resolve_WithoutIdempotencyKey_ReturnsBadRequest()
     {
-        var client = AuthenticatedClient(Guid.NewGuid(), EswmpPermissions.WorkRequirementRead);
+        var tenantId = Guid.NewGuid();
+        var client = AuthenticatedClient(tenantId, EswmpPermissions.WorkRequirementResolve);
 
-        var response = await client.PostAsJsonAsync("/api/v1/work-requirements", NewRequest("WR-FORBIDDEN"));
+        var response = await client.PostAsJsonAsync("/api/v1/work-requirements/resolve",
+            new { sourceType = "Demand", sourceId = "demand-1", templateCode = "NO_SUCH_TEMPLATE" });
 
-        response.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+        response.StatusCode.Should().Be(HttpStatusCode.BadRequest);
     }
 
     [Fact]
-    public async Task Create_WithoutJwt_ReturnsUnauthorized()
+    public async Task Resolve_TemplateNotActive_ReturnsConflict()
     {
-        var client = factory.CreateClient();
+        var tenantId = Guid.NewGuid();
+        var client = AuthenticatedClient(tenantId, EswmpPermissions.WorkRequirementResolve);
 
-        var response = await client.PostAsJsonAsync("/api/v1/work-requirements", NewRequest("WR-ANON"));
+        var response = await client.SendAsync(PostWithIdempotencyKey(
+            "/api/v1/work-requirements/resolve",
+            new { sourceType = "Demand", sourceId = "demand-1", templateCode = "NO_SUCH_TEMPLATE" },
+            Guid.NewGuid().ToString()));
 
-        response.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+        response.StatusCode.Should().Be(HttpStatusCode.Conflict);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        body.GetProperty("code").GetString().Should().Be("TEMPLATE_NOT_ACTIVE");
     }
 
     [Fact]
     public async Task GetById_ForAnotherTenantsWorkRequirement_ReturnsNotFound()
     {
-        var ownerClient = AuthenticatedClient(Guid.NewGuid(), EswmpPermissions.WorkRequirementWrite);
-        var createResponse = await ownerClient.PostAsJsonAsync("/api/v1/work-requirements", NewRequest("WR-CROSS-TENANT"));
-        var created = await createResponse.Content.ReadFromJsonAsync<WorkRequirement>(TestJson.Options);
+        var ownerClient = AuthenticatedClient(Guid.NewGuid(), AllTemplatePermissions);
+        await CreateAndActivateTemplate(ownerClient, "DOG_WALK_STANDARD_2");
+        var resolveResponse = await ownerClient.SendAsync(PostWithIdempotencyKey(
+            "/api/v1/work-requirements/resolve",
+            new { sourceType = "Demand", sourceId = "demand-x", templateCode = "DOG_WALK_STANDARD_2" },
+            Guid.NewGuid().ToString()));
+        var resolved = await resolveResponse.Content.ReadFromJsonAsync<JsonElement>();
+        var workRequirementId = resolved.GetProperty("workRequirementId").GetGuid();
 
         var otherTenantClient = AuthenticatedClient(Guid.NewGuid(), EswmpPermissions.WorkRequirementRead);
-        var response = await otherTenantClient.GetAsync($"/api/v1/work-requirements/{created!.Id}");
+        var response = await otherTenantClient.GetAsync($"/api/v1/work-requirements/{workRequirementId}");
 
         response.StatusCode.Should().Be(HttpStatusCode.NotFound);
     }
 
     [Fact]
-    public async Task SameCode_AcrossDifferentTenants_DoesNotConflict()
-    {
-        var tenantAClient = AuthenticatedClient(Guid.NewGuid(), EswmpPermissions.WorkRequirementWrite);
-        var tenantBClient = AuthenticatedClient(Guid.NewGuid(), EswmpPermissions.WorkRequirementWrite);
-
-        var firstResponse = await tenantAClient.PostAsJsonAsync("/api/v1/work-requirements", NewRequest("WR-SHARED-CODE"));
-        var secondResponse = await tenantBClient.PostAsJsonAsync("/api/v1/work-requirements", NewRequest("WR-SHARED-CODE"));
-
-        firstResponse.StatusCode.Should().Be(HttpStatusCode.Created);
-        secondResponse.StatusCode.Should().Be(HttpStatusCode.Created);
-    }
-
-    [Fact]
-    public async Task CreateVersion_ThenActivate_MakesVersionActive()
+    public async Task Cancel_ThenCancelAgain_ReturnsStatusConflict()
     {
         var tenantId = Guid.NewGuid();
-        var client = AuthenticatedClient(tenantId, EswmpPermissions.WorkRequirementWrite, EswmpPermissions.WorkRequirementRead);
-        var createResponse = await client.PostAsJsonAsync("/api/v1/work-requirements", NewRequest("WR-ACTIVATE"));
-        var created = await createResponse.Content.ReadFromJsonAsync<WorkRequirement>(TestJson.Options);
+        var client = AuthenticatedClient(tenantId, AllTemplatePermissions.Append(EswmpPermissions.WorkRequirementRevise).ToArray());
+        await CreateAndActivateTemplate(client, "DOG_WALK_STANDARD_3");
+        var resolveResponse = await client.SendAsync(PostWithIdempotencyKey(
+            "/api/v1/work-requirements/resolve",
+            new { sourceType = "Demand", sourceId = "demand-cancel", templateCode = "DOG_WALK_STANDARD_3" },
+            Guid.NewGuid().ToString()));
+        var resolved = await resolveResponse.Content.ReadFromJsonAsync<JsonElement>();
+        var workRequirementId = resolved.GetProperty("workRequirementId").GetGuid();
 
-        var versionRequest = new RequirementVersionRequest(
-            ChangeSummary: "initial",
-            EffectiveFrom: null,
-            EffectiveTo: null,
-            DurationType: DurationType.Fixed,
-            FixedDurationMinutes: 60,
-            MinimumDurationMinutes: null,
-            ExpectedDurationMinutes: null,
-            MaximumDurationMinutes: null,
-            PreWorkBufferMinutes: 0,
-            PostWorkBufferMinutes: 0,
-            ResourceRequirements:
-            [
-                new ResourceRequirementDto("technician", null, 1, 1, 1, true, null, null, null)
-            ],
-            LocationConstraints: null);
+        var first = await client.PostAsync($"/api/v1/work-requirements/{workRequirementId}/cancel", null);
+        var second = await client.PostAsync($"/api/v1/work-requirements/{workRequirementId}/cancel", null);
 
-        var versionResponse = await client.PostAsJsonAsync($"/api/v1/work-requirements/{created!.Id}/versions", versionRequest);
-        versionResponse.StatusCode.Should().Be(HttpStatusCode.Created);
-        var version = await versionResponse.Content.ReadFromJsonAsync<RequirementVersion>(TestJson.Options);
-
-        var activateResponse = await client.PostAsJsonAsync(
-            $"/api/v1/work-requirements/{created.Id}/versions/{version!.VersionNumber}/activate",
-            new ActivateVersionRequest(created.ConcurrencyVersion));
-
-        activateResponse.StatusCode.Should().Be(HttpStatusCode.OK);
-        var activated = await activateResponse.Content.ReadFromJsonAsync<RequirementVersion>(TestJson.Options);
-        activated!.Status.Should().Be(RequirementVersionStatus.Active);
+        first.StatusCode.Should().Be(HttpStatusCode.OK);
+        second.StatusCode.Should().Be(HttpStatusCode.Conflict);
     }
 }

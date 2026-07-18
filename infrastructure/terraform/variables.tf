@@ -50,6 +50,23 @@ variable "jwt_audience" {
   default     = "eswmp-api"
 }
 
+variable "deploy_redis" {
+  description = "Whether to provision Azure Cache for Redis. Defaults to false: CO-11 (Redis-backed slot search caching) is not yet implemented anywhere in the codebase, so paying for a cache nothing reads or writes is pure waste on a limited QA credit. AddStackExchangeRedisCache in Eswmp.Core tolerates an empty Redis:ConnectionString fine (the health check that would exercise it is itself conditional on that value being set — see HealthCheckExtensions.cs). Flip to true once CO-11 actually ships."
+  type        = bool
+  default     = false
+}
+
+variable "budget_alert_email" {
+  description = "Email address that receives Azure Consumption Budget alerts (50/80/100% of monthly_budget_amount). Required — there is no sensible default for someone else's inbox."
+  type        = string
+}
+
+variable "monthly_budget_amount" {
+  description = "Monthly spend threshold (in the subscription's billing currency) for the Consumption Budget alert. Sized as a guardrail against the shared QA credit running out early, not a hard cap — Azure budgets alert, they do not block spend."
+  type        = number
+  default     = 150
+}
+
 locals {
   resource_prefix = "${var.project}-${var.environment}"
   common_tags = {

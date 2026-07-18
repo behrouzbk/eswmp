@@ -3,7 +3,7 @@ using Eswmp.Shared.Middleware;
 using Eswmp.Work.Controllers;
 using Eswmp.Work.Data;
 using Eswmp.Work.Models;
-using MassTransit;
+using Eswmp.Work.Services;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -14,6 +14,11 @@ namespace Eswmp.Work.Tests;
 
 public class WorkRequirementsControllerTests
 {
+    // ASP.NET Core's MVC pipeline defaults AddControllers().AddJsonOptions() to camelCase —
+    // matched here so a raw JsonSerializer.Serialize(ok.Value) round-trip on an anonymous
+    // response object sees the same property names a real HTTP client would.
+    private static readonly JsonSerializerOptions CamelCase = new(JsonSerializerDefaults.Web);
+
     private static WorkDbContext NewDb(Guid tenantId)
     {
         var options = new DbContextOptionsBuilder<WorkDbContext>()
@@ -22,225 +27,273 @@ public class WorkRequirementsControllerTests
         return new WorkDbContext(options, new TenantContext { TenantId = tenantId });
     }
 
-    private static WorkRequirementsController NewController(WorkDbContext db, Guid tenantId, IPublishEndpoint? publishEndpoint = null) =>
-        new(db, new TenantContext { TenantId = tenantId }, publishEndpoint ?? Mock.Of<IPublishEndpoint>());
+    private static RequirementTemplatesController NewTemplatesController(WorkDbContext db, Guid tenantId) =>
+        new(db, new TenantContext { TenantId = tenantId }, Mock.Of<IOutboxPublisher>());
 
-    private static RequirementVersionRequest ValidVersionRequest() => new(
-        ChangeSummary: "initial",
-        EffectiveFrom: null,
-        EffectiveTo: null,
-        DurationType: DurationType.Fixed,
-        FixedDurationMinutes: 60,
-        MinimumDurationMinutes: null,
-        ExpectedDurationMinutes: null,
-        MaximumDurationMinutes: null,
-        PreWorkBufferMinutes: 5,
-        PostWorkBufferMinutes: 5,
-        ResourceRequirements:
-        [
-            new ResourceRequirementDto(
-                ResourceTypeCode: "technician",
-                Role: "lead",
-                MinimumQuantity: 1,
-                PreferredQuantity: 1,
-                MaximumQuantity: 2,
-                Mandatory: true,
-                Capabilities: [new CapabilityRequirementDto("welding", 3, CapabilityImportance.Mandatory)],
-                Skills: [new SkillRequirementDto("forklift", 1, true)],
-                Certifications: [new CertificationRequirementDto("osha-10", true)])
-        ],
-        LocationConstraints:
-        [
-            new LocationConstraintDto(LocationConstraintMode.CustomerLocation, MaximumTravelDistanceKm: 50, MaximumTravelTimeMinutes: 60)
-        ]);
+    private static WorkRequirementsController NewController(WorkDbContext db, Guid tenantId, IOutboxPublisher? outbox = null) =>
+        new(db, new TenantContext { TenantId = tenantId }, outbox ?? Mock.Of<IOutboxPublisher>());
 
-    private async Task<WorkRequirement> CreateWorkRequirement(WorkDbContext db, Guid tenantId, string code = "WR-1")
+    private static JsonElement ValidDefinitionsJson()
     {
-        var controller = NewController(db, tenantId);
-        var created = await controller.Create(new CreateWorkRequirementRequest(code, "Test Requirement", null, null));
-        return Assert.IsType<WorkRequirement>(Assert.IsType<CreatedAtActionResult>(created).Value);
+        var dto = new RequirementSetDto(
+            ResourceRequirements: [new ResourceRoleRequirementDto("DOG_WALKER", ResourceCategory.Person, MinimumQuantity: 1, MaximumQuantity: 1)],
+            DurationRequirement: new DurationRequirementDto(DurationType.Fixed, EstimatedDurationMinutes: 60),
+            CapabilityRequirements: [new CapabilityRequirementDto("DOG_WALKING", RoleCode: "DOG_WALKER", Mandatory: true)],
+            CapacityRequirements: [new CapacityRequirementDto("PET_COUNT", 1, RoleCode: "DOG_WALKER", Unit: "COUNT")],
+            LocationRequirement: new LocationRequirementDto(LocationMode.CustomerLocation));
+
+        return JsonSerializer.Deserialize<JsonElement>(JsonSerializer.Serialize(dto, RequirementResolutionService.JsonOptions));
     }
 
+    /// <summary>Creates and activates DOG_WALK_STANDARD so resolve tests have an Active template to target.</summary>
+    private async Task ActivateStandardTemplate(WorkDbContext db, Guid tenantId)
+    {
+        var templates = NewTemplatesController(db, tenantId);
+        await templates.Create(new CreateTemplateRequest("DOG_WALK_STANDARD", "Standard Dog Walk", null, "DOG_WALKING"), "tpl-create");
+        await templates.ConfigureRequirements(await TemplateId(db, tenantId), 1, ValidDefinitionsJson());
+        await templates.Activate(await TemplateId(db, tenantId), 1);
+    }
+
+    private static async Task<Guid> TemplateId(WorkDbContext db, Guid tenantId) =>
+        (await db.RequirementTemplates.FirstAsync(t => t.TenantId == tenantId && t.Code == "DOG_WALK_STANDARD")).Id;
+
+    private static ResolveWorkRequirementRequest ResolveRequest(string sourceId = "demand-1", JsonElement? inputs = null) =>
+        new("Demand", sourceId, SourceVersion: 1, TemplateCode: "DOG_WALK_STANDARD", Inputs: inputs);
+
+    private static JsonElement InputsWithPetCountAndWindow(int petCount = 2) =>
+        JsonSerializer.Deserialize<JsonElement>(JsonSerializer.Serialize(new
+        {
+            petCount,
+            requestedWindow = new { start = "2026-07-06T08:00:00-07:00", end = "2026-07-06T12:00:00-07:00" },
+        }));
+
     [Fact]
-    public async Task Create_DuplicateCode_ReturnsConflict()
+    public async Task Resolve_WithoutIdempotencyKey_ReturnsBadRequest()
     {
         var tenantId = Guid.NewGuid();
         await using var db = NewDb(tenantId);
         var controller = NewController(db, tenantId);
-        await controller.Create(new CreateWorkRequirementRequest("DUP", "First", null, null));
 
-        var result = await controller.Create(new CreateWorkRequirementRequest("DUP", "Second", null, null));
+        var result = await controller.Resolve(ResolveRequest(), idempotencyKey: null);
 
-        Assert.IsType<ConflictObjectResult>(result);
+        var status = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(StatusCodes.Status400BadRequest, status.StatusCode);
     }
 
     [Fact]
-    public async Task CreateVersion_StartsInDraft_AndBumpsCurrentVersionNumber()
+    public async Task Resolve_TemplateNotActive_ReturnsConflict()
     {
         var tenantId = Guid.NewGuid();
         await using var db = NewDb(tenantId);
-        var wr = await CreateWorkRequirement(db, tenantId);
         var controller = NewController(db, tenantId);
 
-        var result = await controller.CreateVersion(wr.Id, ValidVersionRequest());
+        var result = await controller.Resolve(ResolveRequest(), "resolve-key");
 
-        var version = Assert.IsType<RequirementVersion>(Assert.IsType<CreatedAtActionResult>(result).Value);
-        Assert.Equal(RequirementVersionStatus.Draft, version.Status);
-        Assert.Equal(1, version.VersionNumber);
-
-        var reloaded = await db.WorkRequirements.FindAsync(wr.Id);
-        Assert.Equal(1, reloaded!.CurrentVersionNumber);
+        var status = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(StatusCodes.Status409Conflict, status.StatusCode);
     }
 
     [Fact]
-    public async Task ValidateVersion_MissingResourceRequirements_ReturnsInvalid()
+    public async Task Resolve_ActiveTemplate_CreatesValidWorkRequirementWithCapacityOverlay()
     {
         var tenantId = Guid.NewGuid();
         await using var db = NewDb(tenantId);
-        var wr = await CreateWorkRequirement(db, tenantId);
+        await ActivateStandardTemplate(db, tenantId);
         var controller = NewController(db, tenantId);
-        var badRequest = ValidVersionRequest() with { ResourceRequirements = [] };
-        var created = await controller.CreateVersion(wr.Id, badRequest);
-        var version = Assert.IsType<RequirementVersion>(Assert.IsType<CreatedAtActionResult>(created).Value);
 
-        var result = await controller.ValidateVersion(wr.Id, version.VersionNumber);
+        var result = await controller.Resolve(ResolveRequest(inputs: InputsWithPetCountAndWindow(petCount: 2)), "resolve-key");
+
+        Assert.Equal(StatusCodes.Status201Created, Assert.IsType<ObjectResult>(result).StatusCode);
+        var wr = await db.WorkRequirements.FirstAsync(w => w.SourceId == "demand-1");
+        Assert.Equal(WorkRequirementStatus.Valid, wr.Status);
+
+        var capacity = await db.CapacityRequirements.FirstAsync(c => c.WorkRequirementId == wr.Id);
+        Assert.Equal(2m, capacity.Quantity);
+
+        var time = await db.TimeRequirements.FirstAsync(t => t.WorkRequirementId == wr.Id);
+        Assert.NotNull(time.EarliestStart);
+        Assert.NotNull(time.LatestFinish);
+    }
+
+    [Fact]
+    public async Task Resolve_SameIdempotencyKeySameBody_Replays()
+    {
+        var tenantId = Guid.NewGuid();
+        await using var db = NewDb(tenantId);
+        await ActivateStandardTemplate(db, tenantId);
+        var controller = NewController(db, tenantId);
+        var request = ResolveRequest();
+
+        await controller.Resolve(request, "same-key");
+        await controller.Resolve(request, "same-key");
+
+        Assert.Equal(1, await db.WorkRequirements.CountAsync());
+    }
+
+    [Fact]
+    public async Task Resolve_SameIdempotencyKeyDifferentBody_ReturnsConflict()
+    {
+        var tenantId = Guid.NewGuid();
+        await using var db = NewDb(tenantId);
+        await ActivateStandardTemplate(db, tenantId);
+        var controller = NewController(db, tenantId);
+
+        await controller.Resolve(ResolveRequest("demand-1"), "same-key");
+        var result = await controller.Resolve(ResolveRequest("demand-2"), "same-key");
+
+        var status = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(StatusCodes.Status409Conflict, status.StatusCode);
+    }
+
+    [Fact]
+    public async Task GetResolved_ReturnsResolvedContractWithResourceAndCapacityRequirements()
+    {
+        var tenantId = Guid.NewGuid();
+        await using var db = NewDb(tenantId);
+        await ActivateStandardTemplate(db, tenantId);
+        var controller = NewController(db, tenantId);
+        await controller.Resolve(ResolveRequest(), "resolve-key");
+        var wr = await db.WorkRequirements.FirstAsync();
+
+        var result = await controller.GetResolved(wr.Id);
 
         var ok = Assert.IsType<OkObjectResult>(result);
-        // The controller returns an internal anonymous type — round-trip through JSON
-        // instead of `dynamic`, which can't bind to an anonymous type across assemblies.
-        using var doc = JsonDocument.Parse(JsonSerializer.Serialize(ok.Value));
-        Assert.Equal("Invalid", doc.RootElement.GetProperty("Status").GetString());
+        using var doc = JsonDocument.Parse(JsonSerializer.Serialize(ok.Value, CamelCase));
+        Assert.Equal(1, doc.RootElement.GetProperty("resourceRequirements").GetArrayLength());
+        Assert.Equal("DOG_WALKING", doc.RootElement.GetProperty("workType").GetString());
     }
 
     [Fact]
-    public async Task ValidateVersion_Valid_MarksVersionValidated()
+    public async Task Validate_ValidRequirement_MarksValid()
     {
         var tenantId = Guid.NewGuid();
         await using var db = NewDb(tenantId);
-        var wr = await CreateWorkRequirement(db, tenantId);
+        await ActivateStandardTemplate(db, tenantId);
         var controller = NewController(db, tenantId);
-        var created = await controller.CreateVersion(wr.Id, ValidVersionRequest());
-        var version = Assert.IsType<RequirementVersion>(Assert.IsType<CreatedAtActionResult>(created).Value);
+        await controller.Resolve(ResolveRequest(), "resolve-key");
+        var wr = await db.WorkRequirements.FirstAsync();
 
-        await controller.ValidateVersion(wr.Id, version.VersionNumber);
+        var result = await controller.Validate(wr.Id);
 
-        var reloaded = await db.RequirementVersions.FindAsync(version.Id);
-        Assert.Equal(RequirementVersionStatus.Validated, reloaded!.Status);
+        var ok = Assert.IsType<OkObjectResult>(result);
+        using var doc = JsonDocument.Parse(JsonSerializer.Serialize(ok.Value, CamelCase));
+        Assert.True(doc.RootElement.GetProperty("valid").GetBoolean());
     }
 
     [Fact]
-    public async Task ActivateVersion_StaleExpectedVersion_ReturnsPreconditionFailed()
+    public async Task Revise_StaleExpectedVersion_ReturnsPreconditionFailed()
     {
         var tenantId = Guid.NewGuid();
         await using var db = NewDb(tenantId);
-        var wr = await CreateWorkRequirement(db, tenantId);
+        await ActivateStandardTemplate(db, tenantId);
         var controller = NewController(db, tenantId);
-        var created = await controller.CreateVersion(wr.Id, ValidVersionRequest());
-        var version = Assert.IsType<RequirementVersion>(Assert.IsType<CreatedAtActionResult>(created).Value);
+        await controller.Resolve(ResolveRequest(), "resolve-key");
+        var wr = await db.WorkRequirements.FirstAsync();
 
-        var result = await controller.ActivateVersion(wr.Id, version.VersionNumber, new ActivateVersionRequest(wr.ConcurrencyVersion + 1));
+        var result = await controller.Revise(wr.Id, new ReviseWorkRequirementRequest(wr.RequirementVersion + 1, "test", null), "revise-key");
 
         var status = Assert.IsType<ObjectResult>(result);
         Assert.Equal(StatusCodes.Status412PreconditionFailed, status.StatusCode);
     }
 
     [Fact]
-    public async Task ActivateVersion_ThenActivateNewVersion_SupersedesThePriorActiveVersion()
+    public async Task Revise_CapacityChange_BumpsVersionAndPersistsNewQuantity()
     {
         var tenantId = Guid.NewGuid();
         await using var db = NewDb(tenantId);
-        var wr = await CreateWorkRequirement(db, tenantId);
-        var controller = NewController(db, tenantId, Mock.Of<IPublishEndpoint>());
+        await ActivateStandardTemplate(db, tenantId);
+        var controller = NewController(db, tenantId);
+        await controller.Resolve(ResolveRequest(), "resolve-key");
+        var wr = await db.WorkRequirements.FirstAsync();
 
-        var createdV1 = await controller.CreateVersion(wr.Id, ValidVersionRequest());
-        var v1 = Assert.IsType<RequirementVersion>(Assert.IsType<CreatedAtActionResult>(createdV1).Value);
-        await controller.ActivateVersion(wr.Id, v1.VersionNumber, new ActivateVersionRequest(wr.ConcurrencyVersion));
+        var changes = JsonSerializer.Deserialize<JsonElement>(JsonSerializer.Serialize(new
+        {
+            capacityRequirements = new[] { new { roleCode = "DOG_WALKER", dimensionCode = "PET_COUNT", quantity = 3 } },
+        }));
 
-        var wrAfterFirstActivate = await db.WorkRequirements.FindAsync(wr.Id);
+        var result = await controller.Revise(wr.Id, new ReviseWorkRequirementRequest(wr.RequirementVersion, "owner added a pet", changes), "revise-key");
 
-        var createdV2 = await controller.CreateVersion(wr.Id, ValidVersionRequest());
-        var v2 = Assert.IsType<RequirementVersion>(Assert.IsType<CreatedAtActionResult>(createdV2).Value);
-        var activateV2Result = await controller.ActivateVersion(
-            wr.Id, v2.VersionNumber, new ActivateVersionRequest(wrAfterFirstActivate!.ConcurrencyVersion));
-
-        Assert.IsType<OkObjectResult>(activateV2Result);
-
-        var reloadedV1 = await db.RequirementVersions.FirstAsync(v => v.WorkRequirementId == wr.Id && v.VersionNumber == v1.VersionNumber);
-        var reloadedV2 = await db.RequirementVersions.FirstAsync(v => v.WorkRequirementId == wr.Id && v.VersionNumber == v2.VersionNumber);
-        var reloadedWr = await db.WorkRequirements.FindAsync(wr.Id);
-
-        Assert.Equal(RequirementVersionStatus.Superseded, reloadedV1.Status);
-        Assert.Equal(RequirementVersionStatus.Active, reloadedV2.Status);
-        Assert.Equal(v2.VersionNumber, reloadedWr!.ActiveVersionNumber);
+        Assert.Equal(StatusCodes.Status201Created, Assert.IsType<ObjectResult>(result).StatusCode);
+        var reloaded = await db.WorkRequirements.FindAsync(wr.Id);
+        Assert.Equal(2, reloaded!.RequirementVersion);
+        var capacity = await db.CapacityRequirements.FirstAsync(c => c.WorkRequirementId == wr.Id);
+        Assert.Equal(3m, capacity.Quantity);
+        Assert.Equal(2, await db.RequirementVersions.CountAsync(v => v.WorkRequirementId == wr.Id));
     }
 
     [Fact]
-    public async Task PatchVersion_OnceActive_IsRejectedAsImmutable()
+    public async Task Revise_TerminalStatus_ReturnsStatusConflict()
     {
         var tenantId = Guid.NewGuid();
         await using var db = NewDb(tenantId);
-        var wr = await CreateWorkRequirement(db, tenantId);
+        await ActivateStandardTemplate(db, tenantId);
         var controller = NewController(db, tenantId);
-        var created = await controller.CreateVersion(wr.Id, ValidVersionRequest());
-        var version = Assert.IsType<RequirementVersion>(Assert.IsType<CreatedAtActionResult>(created).Value);
-        await controller.ActivateVersion(wr.Id, version.VersionNumber, new ActivateVersionRequest(wr.ConcurrencyVersion));
+        await controller.Resolve(ResolveRequest(), "resolve-key");
+        var wr = await db.WorkRequirements.FirstAsync();
+        await controller.Cancel(wr.Id);
 
-        var result = await controller.UpdateVersion(wr.Id, version.VersionNumber, ValidVersionRequest() with { ChangeSummary = "edited after active" });
+        var result = await controller.Revise(wr.Id, new ReviseWorkRequirementRequest(wr.RequirementVersion, null, null), "revise-key");
 
-        Assert.IsType<ConflictObjectResult>(result);
+        var status = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(StatusCodes.Status409Conflict, status.StatusCode);
     }
 
     [Fact]
-    public async Task PatchVersion_WhileDraft_Succeeds()
+    public async Task Cancel_AlreadyCancelled_ReturnsConflict()
     {
         var tenantId = Guid.NewGuid();
         await using var db = NewDb(tenantId);
-        var wr = await CreateWorkRequirement(db, tenantId);
+        await ActivateStandardTemplate(db, tenantId);
         var controller = NewController(db, tenantId);
-        var created = await controller.CreateVersion(wr.Id, ValidVersionRequest());
-        var version = Assert.IsType<RequirementVersion>(Assert.IsType<CreatedAtActionResult>(created).Value);
+        await controller.Resolve(ResolveRequest(), "resolve-key");
+        var wr = await db.WorkRequirements.FirstAsync();
+        await controller.Cancel(wr.Id);
 
-        var result = await controller.UpdateVersion(wr.Id, version.VersionNumber, ValidVersionRequest() with { ChangeSummary = "edited while draft" });
+        var result = await controller.Cancel(wr.Id);
 
-        var updated = Assert.IsType<RequirementVersion>(Assert.IsType<OkObjectResult>(result).Value);
-        Assert.Equal("edited while draft", updated.ChangeSummary);
+        var status = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(StatusCodes.Status409Conflict, status.StatusCode);
     }
 
     [Fact]
-    public async Task Retire_AlreadyRetired_ReturnsConflict()
+    public async Task Compare_BetweenResolveAndRevision_ReportsCapacityRequirementsChanged()
     {
         var tenantId = Guid.NewGuid();
         await using var db = NewDb(tenantId);
-        var wr = await CreateWorkRequirement(db, tenantId);
+        await ActivateStandardTemplate(db, tenantId);
         var controller = NewController(db, tenantId);
-        await controller.Retire(wr.Id);
+        await controller.Resolve(ResolveRequest(), "resolve-key");
+        var wr = await db.WorkRequirements.FirstAsync();
 
-        var result = await controller.Retire(wr.Id);
+        var changes = JsonSerializer.Deserialize<JsonElement>(JsonSerializer.Serialize(new
+        {
+            capacityRequirements = new[] { new { roleCode = "DOG_WALKER", dimensionCode = "PET_COUNT", quantity = 3 } },
+        }));
+        await controller.Revise(wr.Id, new ReviseWorkRequirementRequest(wr.RequirementVersion, "bump", changes), "revise-key");
 
-        Assert.IsType<ConflictObjectResult>(result);
+        var result = await controller.Compare(wr.Id, 1, 2);
+
+        var ok = Assert.IsType<OkObjectResult>(result);
+        using var doc = JsonDocument.Parse(JsonSerializer.Serialize(ok.Value, CamelCase));
+        var changedCategories = doc.RootElement.GetProperty("changedCategories").EnumerateArray().Select(e => e.GetString()).ToList();
+        Assert.Contains("capacityRequirements", changedCategories);
     }
 
     [Fact]
-    public async Task CreateSnapshot_FreezesVersionAndChildrenIntoDefinitionJson()
+    public async Task Explain_ReturnsSummaryAndDerivedRequirements()
     {
         var tenantId = Guid.NewGuid();
         await using var db = NewDb(tenantId);
-        var wr = await CreateWorkRequirement(db, tenantId);
+        await ActivateStandardTemplate(db, tenantId);
         var controller = NewController(db, tenantId);
-        var created = await controller.CreateVersion(wr.Id, ValidVersionRequest());
-        var version = Assert.IsType<RequirementVersion>(Assert.IsType<CreatedAtActionResult>(created).Value);
+        await controller.Resolve(ResolveRequest(), "resolve-key");
+        var wr = await db.WorkRequirements.FirstAsync();
 
-        var result = await controller.CreateSnapshot(wr.Id, new CreateSnapshotRequest(version.VersionNumber, "pre-acceptance freeze"));
+        var result = await controller.Explain(wr.Id);
 
-        var snapshot = Assert.IsType<RequirementSnapshot>(Assert.IsType<CreatedAtActionResult>(result).Value);
-        Assert.Equal(version.VersionNumber, snapshot.SourceVersionNumber);
-        Assert.Equal(wr.Id, snapshot.SourceRequirementId);
-        Assert.Contains("welding", snapshot.DefinitionJson);
-
-        // Snapshot has no update endpoint — it is immutable once created by construction
-        // (there's simply no code path that can mutate DefinitionJson after this point).
-        var getResult = await controller.GetSnapshot(snapshot.Id);
-        var fetched = Assert.IsType<RequirementSnapshot>(Assert.IsType<OkObjectResult>(getResult).Value);
-        Assert.Equal(snapshot.DefinitionJson, fetched.DefinitionJson);
+        var ok = Assert.IsType<OkObjectResult>(result);
+        using var doc = JsonDocument.Parse(JsonSerializer.Serialize(ok.Value, CamelCase));
+        Assert.False(string.IsNullOrWhiteSpace(doc.RootElement.GetProperty("summary").GetString()));
+        Assert.True(doc.RootElement.GetProperty("derivedRequirements").GetArrayLength() > 0);
     }
 }

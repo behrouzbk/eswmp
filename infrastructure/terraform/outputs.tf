@@ -12,12 +12,12 @@ output "postgres_fqdn" {
 }
 
 output "redis_hostname" {
-  value     = azurerm_redis_cache.redis.hostname
+  value     = var.deploy_redis ? azurerm_redis_cache.redis[0].hostname : null
   sensitive = true
 }
 
 output "redis_primary_key" {
-  value     = azurerm_redis_cache.redis.primary_access_key
+  value     = var.deploy_redis ? azurerm_redis_cache.redis[0].primary_access_key : null
   sensitive = true
 }
 

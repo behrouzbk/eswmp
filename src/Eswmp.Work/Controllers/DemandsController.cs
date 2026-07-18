@@ -77,6 +77,13 @@ public class DemandsController(
     private static readonly DemandStatus[] ImmutableStatuses =
         [DemandStatus.Accepted, DemandStatus.Rejected, DemandStatus.Cancelled, DemandStatus.Expired];
 
+    /// <summary>
+    /// Npgsql only accepts DateTimeOffset with Offset=0 for a `timestamp with time zone`
+    /// column — every DateTimeOffset parsed from caller-supplied JSON (which may carry any
+    /// offset) must be normalized before it reaches a query or an entity property.
+    /// </summary>
+    private static DateTimeOffset? ToUtc(DateTimeOffset? value) => value?.ToUniversalTime();
+
     [HttpPost]
     [RequirePermission(EswmpPermissions.DemandCreate)]
     public async Task<IActionResult> Create(
@@ -113,8 +120,8 @@ public class DemandsController(
             Priority = request.Priority ?? DemandPriority.Normal,
             Summary = request.Summary,
             Description = request.Description,
-            RequestedStartAtUtc = request.RequestedStartAtUtc,
-            RequestedEndAtUtc = request.RequestedEndAtUtc,
+            RequestedStartAtUtc = ToUtc(request.RequestedStartAtUtc),
+            RequestedEndAtUtc = ToUtc(request.RequestedEndAtUtc),
             RequestedTimezone = request.RequestedTimezone,
             LocationReference = request.LocationReference,
             ExternalReferenceType = request.ExternalReferenceType,
@@ -192,9 +199,9 @@ public class DemandsController(
         if (request.FulfillmentMode is not null)
             query = query.Where(d => d.FulfillmentMode == request.FulfillmentMode);
         if (request.FromUtc is not null)
-            query = query.Where(d => d.CreatedAt >= request.FromUtc);
+            query = query.Where(d => d.CreatedAt >= ToUtc(request.FromUtc));
         if (request.ToUtc is not null)
-            query = query.Where(d => d.CreatedAt <= request.ToUtc);
+            query = query.Where(d => d.CreatedAt <= ToUtc(request.ToUtc));
 
         var totalCount = await query.CountAsync();
         var items = await query
@@ -252,8 +259,8 @@ public class DemandsController(
         if (request.Priority is not null) demand.Priority = request.Priority.Value;
         if (request.Summary is not null) demand.Summary = request.Summary;
         if (request.Description is not null) demand.Description = request.Description;
-        if (request.RequestedStartAtUtc is not null) demand.RequestedStartAtUtc = request.RequestedStartAtUtc;
-        if (request.RequestedEndAtUtc is not null) demand.RequestedEndAtUtc = request.RequestedEndAtUtc;
+        if (request.RequestedStartAtUtc is not null) demand.RequestedStartAtUtc = ToUtc(request.RequestedStartAtUtc);
+        if (request.RequestedEndAtUtc is not null) demand.RequestedEndAtUtc = ToUtc(request.RequestedEndAtUtc);
         if (request.RequestedTimezone is not null) demand.RequestedTimezone = request.RequestedTimezone;
         if (request.LocationReference is not null) demand.LocationReference = request.LocationReference;
         if (request.FulfillmentMode is not null) demand.FulfillmentMode = request.FulfillmentMode.Value;

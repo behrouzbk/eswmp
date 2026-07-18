@@ -1,4 +1,4 @@
-# ESWMP — Claude Code Context
+# ESWMP — Codex Context
 
 > Read this file at the start of every session before generating any code.
 
@@ -141,8 +141,7 @@ lists.
 | MatchEvaluation, CandidateMatchResult, MatchFactorEvaluation, MatchingPolicy, MatchingPolicyVersion                                                                                                                                                                                        | Assignment | `AssignmentDbContext`  | `matching`          |
 | BusinessRule, WorkflowTransitionLog                                                                                                                                                                                                                                                         | Rules      | `RulesDbContext`       | default             |
 | Demand, DemandValidationResult                                                                                                                                                                                                                                                              | Work       | `WorkDbContext`        | `demand`            |
-| RequirementDefinition, RequirementDefinitionVersion, RequirementDefinitionSnapshot, DefinitionResourceRequirement, DefinitionCapabilityRequirement, DefinitionSkillRequirement, DefinitionCertificationRequirement, LocationConstraint — first-generation Work Requirement model, kept alongside the entry below rather than replaced; see the provenance note on `Eswmp.Work.Models.RequirementDefinition` | Work       | `WorkDbContext`        | `requirements`      |
-| RequirementTemplate, RequirementTemplateVersion, WorkRequirement, RequirementVersion, ResourceRoleRequirement, CapabilityRequirement, CertificationRequirement, CapacityRequirement, DurationRequirement, TimeRequirement, LocationRequirement, ExecutionRequirement, TravelRequirement, BufferRequirement, DependencyRequirement, RequirementConstraint, RequirementPreference, WorkRequirementIdempotencyRecord, WorkRequirementOutboxMessage — the reconciled Work Requirement Service (`Arch.jpeg` Box #2), per `docs/api/specs/02-work-requirement-{api,model}.md` + `requirement-schema.sql` | Work       | `WorkDbContext`        | `requirement`       |
+| WorkRequirement, RequirementVersion, RequirementSnapshot, ResourceRequirement, CapabilityRequirement, SkillRequirement, CertificationRequirement, LocationConstraint                                                                                                                       | Work       | `WorkDbContext`        | `requirements`      |
 
 ## Naming & Style Conventions
 
