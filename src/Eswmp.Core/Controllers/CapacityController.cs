@@ -209,44 +209,52 @@ public class CapacityController(CoreDbContext db, ITenantContext tenantContext) 
         await definitionLock.WaitAsync();
         try
         {
-            await using var transaction = await db.Database.BeginTransactionAsync();
-
-            // Re-fetch the definition and re-run the capacity computation inside the
-            // lock/transaction so a concurrent hold committed between the check above
-            // and now is accounted for — this is the "check-then-insert" atomicity guard.
-            var (effective, held, consumed) = await ComputeCapacityAsync(definition, request.StartTime, request.EndTime);
-            var remaining = effective - held - consumed;
-
-            if (remaining < request.Quantity)
+            // NpgsqlRetryingExecutionStrategy (EnableRetryOnFailure) refuses to run inside a
+            // manually-created transaction unless the whole attempt — including the BeginTransactionAsync
+            // itself — is retried as one unit via CreateExecutionStrategy().ExecuteAsync; confirmed live
+            // 2026-07-19 (InvalidOperationException: "does not support user-initiated transactions").
+            var strategy = db.Database.CreateExecutionStrategy();
+            return await strategy.ExecuteAsync<IActionResult>(async () =>
             {
-                return Conflict(new
+                await using var transaction = await db.Database.BeginTransactionAsync();
+
+                // Re-fetch the definition and re-run the capacity computation inside the
+                // lock/transaction so a concurrent hold committed between the check above
+                // and now is accounted for — this is the "check-then-insert" atomicity guard.
+                var (effective, held, consumed) = await ComputeCapacityAsync(definition, request.StartTime, request.EndTime);
+                var remaining = effective - held - consumed;
+
+                if (remaining < request.Quantity)
                 {
-                    error = $"Requested quantity {request.Quantity} exceeds remaining capacity {remaining} for dimension {request.DimensionCode}.",
-                });
-            }
+                    return Conflict(new
+                    {
+                        error = $"Requested quantity {request.Quantity} exceeds remaining capacity {remaining} for dimension {request.DimensionCode}.",
+                    });
+                }
 
-            var hold = new CapacityHold
-            {
-                TenantId = tenantContext.RequiredTenantId,
-                CapacityDefinitionId = definition.Id,
-                ResourceId = request.ResourceId,
-                DimensionCode = request.DimensionCode,
-                Quantity = request.Quantity,
-                StartTime = request.StartTime,
-                EndTime = request.EndTime,
-                Status = CapacityHoldStatus.Active,
-                ExpiresAt = DateTimeOffset.UtcNow.AddSeconds(request.HoldDurationSeconds <= 0 ? 60 : request.HoldDurationSeconds),
-                IdempotencyKey = request.IdempotencyKey,
-                SourceType = request.SourceType,
-                SourceId = request.SourceId,
-            };
+                var hold = new CapacityHold
+                {
+                    TenantId = tenantContext.RequiredTenantId,
+                    CapacityDefinitionId = definition.Id,
+                    ResourceId = request.ResourceId,
+                    DimensionCode = request.DimensionCode,
+                    Quantity = request.Quantity,
+                    StartTime = request.StartTime,
+                    EndTime = request.EndTime,
+                    Status = CapacityHoldStatus.Active,
+                    ExpiresAt = DateTimeOffset.UtcNow.AddSeconds(request.HoldDurationSeconds <= 0 ? 60 : request.HoldDurationSeconds),
+                    IdempotencyKey = request.IdempotencyKey,
+                    SourceType = request.SourceType,
+                    SourceId = request.SourceId,
+                };
 
-            db.CapacityHolds.Add(hold);
-            WriteLedger(definition.Id, request.ResourceId, CapacityLedgerEntryType.HoldAcquired, request.DimensionCode, request.Quantity);
-            await db.SaveChangesAsync();
-            await transaction.CommitAsync();
+                db.CapacityHolds.Add(hold);
+                WriteLedger(definition.Id, request.ResourceId, CapacityLedgerEntryType.HoldAcquired, request.DimensionCode, request.Quantity);
+                await db.SaveChangesAsync();
+                await transaction.CommitAsync();
 
-            return CreatedAtAction(nameof(GetHold), new { id = hold.Id }, hold);
+                return CreatedAtAction(nameof(GetHold), new { id = hold.Id }, hold);
+            });
         }
         finally
         {

@@ -147,10 +147,8 @@ public class MatchingController(
             candidates.Count,
             ranked);
 
-        await using var transaction = await db.Database.BeginTransactionAsync();
         db.MatchEvaluations.Add(evaluation);
         await db.SaveChangesAsync();
-        await transaction.CommitAsync();
 
         return Ok(ToEvaluateResponse(evaluation));
     }
@@ -231,11 +229,9 @@ public class MatchingController(
             candidates.Count,
             ranked);
 
-        await using var transaction = await db.Database.BeginTransactionAsync();
         previous.Status = MatchEvaluationStatus.Invalidated;
         db.MatchEvaluations.Add(newEvaluation);
         await db.SaveChangesAsync();
-        await transaction.CommitAsync();
 
         return Ok(ToEvaluateResponse(newEvaluation));
     }

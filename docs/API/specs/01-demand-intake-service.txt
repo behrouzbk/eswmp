@@ -1,0 +1,337 @@
+# ESWMP — Demand Intake Service
+
+## 1. Executive Summary
+
+The Demand Intake Service is the controlled entry point through which a caller (PetZiv today, other tenants later) submits a request for work into ESWMP. It exists to separate the caller's own business vocabulary — "a grooming request," "a plumbing dispatch," "a home nursing visit" — from ESWMP's internal scheduling primitives, which must never understand what any of that means. A Demand is the generic, opaque unit that results: what kind of work, roughly when, and an unexamined pointer back into the caller's own domain.
+
+It answers: "A request for work has arrived — is it well-formed enough to act on?"
+It does not answer which resource performs the work, when exactly it's scheduled, or whether it's been completed — those belong to Resource, Availability, Scheduling, Assignment, and Work Management (see §2).
+
+## 2. Domain Boundary
+
+Owns:
+- Demand
+- DemandValidationResult
+- DemandIdempotencyRecord
+
+References but does not own:
+- Tenant
+- Organization, as an opaque Guid?; no Organization service exists yet
+- WorkRequirement, as an opaque Guid? pointer, set once a demand is matched to one — see docs/api/specs/02-work-requirement-service.md
+
+Must never own:
+- Customer/Pet/Patient records
+- provider commercial profiles
+- commercial service catalog
+- pricing
+- payments
+- invoicing
+- resource availability
+- slot generation
+- reservations
+- appointments
+- assignments
+- dispatch
+- tasks
+- work execution
+- notifications
+- payroll
+- HR records
+
+These do not appear anywhere in Eswmp.Work.
+
+Prohibited dependencies, honored as-built:
+- DemandsController never queries Eswmp.Core's CoreDbContext.
+- DemandsController never creates a Reservation or Appointment.
+- DemandsController never selects or assigns a Resource.
+- The only way a Demand influences scheduling is indirectly, via RequirementReferenceId and the DemandAcceptedEvent.
+- A future Work Management module is expected to consume that event and drive the actual scheduling handoff, not this service.
+
+## 3. Microservice / Deployment
+
+Service: Eswmp.Work
+Port: 6004
+Database: eswmp_work
+Schema: demand (this module only; the sibling Work Requirement module lives in schema requirements in the same database — see docs/ARCHITECTURE.md §1.2)
+DbContext: WorkDbContext (src/Eswmp.Work/Data/WorkDbContext.cs)
+Controller: DemandsController (src/Eswmp.Work/Controllers/DemandsController.cs)
+Deployment recommendation (per source spec): Module within the "Work & Workforce" deployable unit, alongside Work Requirement, Work Management, Assignment, Dispatch, Task Execution — only Demand Intake and Work Requirement are built today
+Extraction trigger (per source spec, not yet met): Very high external intake volume, independent engineering ownership, partner-integration isolation, marketplace demand ingestion
+
+Eswmp.Work cannot read or write Eswmp.Core's, Eswmp.Assignment's, or Eswmp.Rules' databases directly (CLAUDE.md rule 4), and within Eswmp.Work itself, Demand Intake code must not touch the requirements schema's tables directly (CLAUDE.md rule 11).
+
+## 4. Data Model(s)
+
+All entities inherit TenantScopedEntity (Id, TenantId, CreatedAt/CreatedBy/UpdatedAt/UpdatedBy) or the tenant-less BaseEntity, both from Eswmp.Shared.DTOs.
+
+Demand
+Table: demand.Demands
+Role: aggregate root
+
+OrganizationId: Guid?
+Notes: Opaque — no Organization service exists yet
+
+DemandType: string (required)
+Notes: Caller-defined, e.g. "ScheduledService", "EmergencyWork"
+
+SourceSystem: string (required)
+Notes: Which caller system submitted this
+
+SourceChannel: string?
+Notes: e.g. "MobileApp", "CallCenter"
+
+Status: DemandStatus enum, default Received
+Notes: See lifecycle, §7
+
+Priority: DemandPriority enum, default Normal
+Notes: Low, Normal, High, Urgent, Critical
+
+Summary / Description: string?
+Notes: Optional text fields
+
+RequestedStartAtUtc / RequestedEndAtUtc: DateTimeOffset?
+Notes: Optional requested time window
+
+RequestedTimezone: string?
+Notes: Optional timezone identifier
+
+LocationReference: string?, jsonb
+Notes: Opaque JSON — no Location service exists yet
+
+RequirementReferenceId: Guid?
+Notes: Set once matched to a WorkRequirement
+
+ExternalReferenceType / ExternalReferenceId: string (required)
+Notes: The opaque caller-domain pointer — mirrors Eswmp.Core's Reservation pattern, per CLAUDE.md rule 1
+
+Version: int, default 1
+Notes: Optimistic concurrency — required as expectedVersion on PATCH
+
+DemandStatus values:
+- Received
+- Validating
+- Ready
+- Accepted
+- Rejected
+- Cancelled
+- Expired
+
+DemandPriority values:
+- Low
+- Normal
+- High
+- Urgent
+- Critical
+
+DemandValidationResult
+Table: demand.DemandValidationResults
+
+DemandId: Guid
+Notes: Identifier of the related Demand
+
+Status: DemandValidationStatus enum
+Notes: Invalid, ValidWithWarnings, Valid
+
+ValidatedAt: DateTimeOffset
+Notes: Timestamp of validation
+
+IssuesJson: string, jsonb
+Notes: Serialized [{code, severity, message}]
+
+DemandIdempotencyRecord
+Table: demand.DemandIdempotencyRecords
+
+IdempotencyKey: string (required)
+Notes: Caller-supplied, from the Idempotency-Key header
+
+RequestHash: string (required)
+Notes: SHA-256 of the create-request JSON — detects same-key/different-body reuse
+
+DemandId: Guid
+Notes: Related Demand identifier
+
+ResponseBodyJson: string, jsonb
+Notes: The original 201 response, replayed verbatim on a matching retry
+
+Unique index:
+- TenantId + IdempotencyKey
+
+## 5. API(s)
+
+Base path: /api/v1/demands
+Contract: contracts/openapi/work.v1.yaml
+
+POST /
+Permission: demand.create
+Notes: Requires Idempotency-Key header. Same key + same request body replays the original 201. Same key + different body returns 409.
+
+GET /{id}
+Permission: demand.read
+
+POST /search
+Permission: demand.read
+Notes: Filters: status, priority, demandType, created-date range. Paged (PagedResult<Demand>).
+
+PATCH /{id}
+Permission: demand.create
+Notes: Requires expectedVersion (412 on mismatch). Mutability depends on status:
+- Received = broadly mutable
+- Ready = Priority only; any other field returns 409
+- Accepted / Rejected / Cancelled / Expired = fully immutable; returns 409
+
+POST /{id}/validate
+Permission: demand.create
+Notes: Runs the rule set in §6; moves Received to Ready (or stays Received if invalid) and records a DemandValidationResult.
+
+POST /{id}/accept
+Permission: demand.create
+Notes: Only from Ready. Publishes DemandAcceptedEvent.
+
+POST /{id}/reject
+Permission: demand.create
+Notes: Body requires reasonCode; comment is optional. Not allowed from a terminal status. Publishes DemandRejectedEvent.
+
+POST /{id}/cancel
+Permission: demand.create
+Notes: Not allowed from a terminal status. Publishes DemandCancelledEvent.
+
+GET /{id}/history
+Permission: demand.read
+Notes: Returns [] today — no dedicated audit table exists yet; deferred until a real audit need is demonstrated (see §9).
+
+Standard error shape on validation/idempotency failures:
+- { error: string }
+
+## 6. Policies
+
+Idempotency:
+- Every POST / requires Idempotency-Key.
+- Enforced by a unique TenantId + IdempotencyKey index plus a request-body hash check.
+- A replay with a different body is a hard 409, not silently accepted.
+
+Optimistic concurrency:
+- Every material mutation after creation carries a Version counter.
+- PATCH requires the caller to supply the expectedVersion it last saw.
+- Mismatch returns 412 Precondition Failed.
+
+Status-dependent mutability:
+- Received = broadly mutable
+- Validating / Ready = Priority-only
+- Accepted / Rejected / Cancelled / Expired = fully immutable
+- Enforced identically by PATCH, validate, accept, reject, and cancel using the same ImmutableStatuses set.
+
+Validation rules (run by POST /{id}/validate):
+- MISSING_EXTERNAL_REFERENCE (Error): ExternalReferenceType / Id blank
+- INVALID_TIME_WINDOW (Error): RequestedStartAtUtc >= RequestedEndAtUtc
+- MISSING_DESCRIPTION (Warning): neither Summary nor Description is set
+- Any Error keeps the Demand in Received, not Ready
+- Warnings-only moves the Demand to Ready with ValidWithWarnings
+
+Multi-tenancy:
+- Every entity carries TenantId
+- WorkDbContext applies HasQueryFilter on Demand and DemandIdempotencyRecord
+- No manual .Where(TenantId == ...) anywhere in DemandsController
+
+Permissions:
+- demand.create gates every write, including validate / accept / reject / cancel
+- demand.read gates get / search / history
+
+Reject reason is mandatory:
+- RejectDemandRequest.ReasonCode is required
+- Enforced with an explicit 400 if blank, not just a schema hint
+
+## 7. Lifecycle (state machine)
+
+Received --validate(no errors)--> Ready --accept--> Accepted (terminal)
+Received --validate(has errors)--> Received (unchanged)
+Received / Validating / Ready --reject--> Rejected (terminal)
+Received / Validating / Ready --cancel--> Cancelled (terminal)
+Expired is a defined terminal state; nothing transitions a Demand to it yet — no expiry sweep job exists, see §9
+
+## 8. Domain Events
+
+Published via IPublishEndpoint (MassTransit — AddEswmpMessageBus), defined in Eswmp.Shared.Events.WorkEvents.
+
+DemandAcceptedEvent
+Fields:
+- DemandId
+- TenantId
+- CorrelationId
+Fired on:
+- POST /{id}/accept
+
+DemandRejectedEvent
+Fields:
+- DemandId
+- TenantId
+- ReasonCode
+- Comment?
+- CorrelationId
+Fired on:
+- POST /{id}/reject
+
+DemandCancelledEvent
+Fields:
+- DemandId
+- TenantId
+- CorrelationId
+Fired on:
+- POST /{id}/cancel
+
+All three carry only opaque platform identifiers — never ExternalReferenceType / Id or any caller-domain field — per CLAUDE.md rule 1. No consumer exists yet for any of them (Work Management, the natural consumer of DemandAcceptedEvent, is not built — see §10).
+
+## 9. Testing
+
+Unit tests (tests/unit/Eswmp.Work.Tests/DemandsControllerTests.cs):
+- Idempotency-key replay and conflict
+- Validate lifecycle, including the error-stays-Received path and the warnings-go-Ready path
+- Accept / reject / cancel guards against terminal statuses
+- PATCH optimistic-concurrency (412)
+- Ready-status field-restriction rule
+
+Integration tests (tests/integration/Eswmp.Work.IntegrationTests/DemandsApiTests.cs, Testcontainers Postgres):
+- Create to get round trip
+- Idempotency-key replay
+- Permission-denied (403)
+- Unauthenticated (401)
+- Cross-tenant 404
+- Validate to accept lifecycle
+
+Compiles; not executed in this environment (needs Docker).
+
+## 10. Deviations from the source workshop spec (.docx, Document #01)
+
+The source spec is a design proposal; building it surfaced a few points where the as-built code diverges, all intentional simplifications:
+
+No ExternalReference entity:
+- The spec models a general-purpose ExternalReference sub-entity with a relationshipType enum (Origin, Parent, Related, RequestedBy, Subject, Contract, Case).
+- The as-built Demand instead carries a single flat ExternalReferenceType / ExternalReferenceId pair.
+- This matches the simpler pattern already proven in Eswmp.Core's Reservation.
+- Multiple or typed external references were judged speculative until a real multi-reference need appears.
+
+No DemandLifecycleEntry / dedicated history table:
+- GET /{id}/history returns [] rather than a real audit trail.
+- The spec names this entity but gives it no field list either, so nothing was lost by deferring it.
+
+DemandTimeConstraint's 5 patterns collapsed to 2 fields:
+- The spec describes five time-constraint shapes: Exact, Window, Date-only, Deadline, Flexible.
+- The as-built Demand just has RequestedStartAtUtc / RequestedEndAtUtc, both nullable.
+- That covers Exact and Window today.
+- Date-only, Deadline, and Flexible would need a type discriminator added later if a real caller needs them.
+
+No consumed events:
+- The spec lists TenantSuspended, OrganizationDeactivated, and WorkCreated as consumed events.
+- None are wired up, since Eswmp.Work does not yet react to any external state change.
+
+Naming inconsistency in the spec:
+- The spec used requestedStartAt in one section and requestedStartAtUtc in another.
+- The code resolved this as RequestedStartAtUtc / RequestedEndAtUtc.
+- The Utc suffix was treated as authoritative.
+
+## 11. Not yet built (backlog)
+
+- Real audit/history trail behind GET /{id}/history
+- Automatic expiry; nothing currently transitions a Demand into Expired
+- ExternalReference as its own multi-relationship entity, if a real multi-reference need appears
+- Any consumer of DemandAcceptedEvent / DemandRejectedEvent / DemandCancelledEvent; this depends on Work Management, which is not yet built
+- AsyncAPI contract for these three events, mirroring Eswmp.Core's CO-16 backlog item, tracked as WK-10 in docs/TASK_BOARD.md

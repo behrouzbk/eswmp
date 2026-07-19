@@ -128,7 +128,17 @@ coverage/
 lcov.info
 
 # --- Docs (internal planning documents — never commit) ---
-docs/
+# Exceptions: docs/API and docs/Azure are operational guides meant for remote
+# testers/developers and anyone deploying to Azure — those get tracked and
+# pushed like normal source. Everything else directly under docs/ (status
+# trackers, task boards, planning docs) stays local-only, per the rule above.
+# Must be docs/* (not docs/) — negating a subdirectory doesn't work if the
+# parent itself is excluded (git's documented gitignore limitation); docs/*
+# excludes each immediate child individually instead, which the !docs/API/
+# and !docs/Azure/ negations below can then override.
+docs/*
+!docs/API/
+!docs/Azure/
 
 # --- Claude Code local settings ---
 .claude/settings.local.json

@@ -91,6 +91,14 @@ embeds it (PetZiv today, others later).
     owning module's own service/repository class, never a raw query into its
     tables. This is rule 4 applied one level down, between modules in one
     service instead of between services. See `docs/ARCHITECTURE.md` §1.2.
+12. **Keep `docs/API/REMOTE_TESTING_GUIDE.md` current.** Whenever a service or
+    API endpoint is created (or changed) and passes its dev tests, add/update
+    its entry in that guide — method, gateway path, required permission,
+    example request/response — the same way rule 9 requires a test class
+    alongside every implementation. That guide is what remote QA
+    testers/developers use to call services through the Gateway without a
+    local checkout; an endpoint that exists in code but not in the guide is,
+    from a remote tester's perspective, an endpoint that doesn't exist.
 
 ## Tracking Document Synchronization
 

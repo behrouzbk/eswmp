@@ -1,0 +1,2 @@
+ create spec for 'Work Requirement service' md format document and put in docs\API\spacs , and same created for demand intake service ( docs\spi\specs\01-demand-intake-service.md ) include :  Executive Summary ,  Domain Boundary , Microservice / Deployment  , data model(s), API(s) , database(s) , and so on , Avoid using Markdown tables because they often render inconsistently across editors and are difficult to maintain.
+  Whenever information would normally be presented in a table, use structured bullet lists instead.

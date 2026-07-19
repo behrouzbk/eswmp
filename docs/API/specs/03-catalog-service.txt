@@ -1,0 +1,391 @@
+# ESWMP — Catalog Service
+
+Status: Proposed for Workshop Review — drafted 2026-07-17. No source workshop
+.docx exists for this service (unlike Demand Intake and Work Requirement,
+Documents 01/02) and no code exists yet. This is a first-pass engineering
+draft, following the section list and conventions the received specs and the
+self-drafted Scheduling Service Specification already established, so that
+Catalog can go through the same workshop-review process before anything is
+built. Per the box-by-box working agreement, this is the spec-first
+deliverable for Arch.jpeg box 3 — no code changes accompany this document.
+
+## 1. Executive Summary
+
+The Catalog Service is the generic, tenant-owned registry of reference
+vocabulary that other ESWMP services currently either hard-code or leave as
+uncontrolled free text. Arch.jpeg groups three responsibilities under box 3,
+in the Demand & Intake domain, immediately after Demand Intake (box 1) and
+Work Requirement (box 2):
+
+- Service Catalog (Generic) — the tenant's own catalog of service offerings,
+  kept intentionally opaque and generic (no vertical-specific fields), per
+  CLAUDE.md rule 1.
+- Work Types — a governed vocabulary for the kind of work being requested.
+- Equipment Types — a governed vocabulary for equipment/resource
+  classifications.
+
+It answers: "Is this code a real, currently-active value in the tenant's
+vocabulary — and what does it mean?" It does not answer whether a specific
+Resource holds a given classification (Resource, box 4), whether a specific
+Demand or WorkRequirement is well-formed (Demand Intake, Work Requirement —
+boxes 1 and 2), or how work gets scheduled, matched, or executed. Catalog is
+pure reference/master data: low write volume, read-heavy, safe to cache
+aggressively.
+
+This spec exists because building Demand Intake and Work Requirement
+(Documents 01/02, both already implemented) surfaced a real, concrete gap:
+several fields on those two services' own entities are exactly the kind of
+governed vocabulary Catalog would provide, but today are uncontrolled free
+strings with no registry behind them. See section 9 for the specific fields.
+
+## 2. Domain Boundary
+
+Owns:
+- CatalogEntry — the single generic entity backing all three Arch.jpeg
+  bullets (see section 4 for why one shape, not three tables).
+
+References but does not own:
+- Tenant — every CatalogEntry is tenant-scoped, no cross-tenant sharing.
+- Nothing else. Catalog Entries are self-contained; they do not point at a
+  Demand, WorkRequirement, or Resource — those services point at Catalog,
+  never the reverse, keeping Catalog a leaf dependency with no outbound
+  coupling.
+
+Must never own:
+- Resource identity, capabilities, skills, certifications, or availability
+  (Resource, Availability — boxes 4, 5).
+- Demand or WorkRequirement records themselves (Demand Intake, Work
+  Requirement — boxes 1, 2). Catalog supplies the vocabulary those records
+  draw from; it never holds a reference back to a specific Demand or
+  WorkRequirement instance.
+- Pricing, commercial terms, or anything that makes the "Service Catalog"
+  bullet vertical-specific — it stays a generic named/described entry, per
+  CLAUDE.md rule 1, exactly as Arch.jpeg's own label "(Generic)" implies.
+- Scheduling, assignment, dispatch, or execution state of any kind.
+
+Prohibited dependencies (proposed, mirrors every other received spec):
+- Must never query Eswmp.Core's, Eswmp.Assignment's, or Eswmp.Rules'
+  databases directly (CLAUDE.md rule 4).
+- If built as a module inside Eswmp.Work (see section 3), Catalog code must
+  never touch the demand or requirements schemas' tables directly, only
+  through those modules' own application code (CLAUDE.md rule 11).
+
+## 3. Microservice / Deployment
+
+Proposed service: Eswmp.Work (new third module, not a new standalone
+service).
+
+Rationale: Arch.jpeg places Catalog in the same "Demand & Intake" swim-lane
+as Demand Intake and Work Requirement, both of which already live in
+Eswmp.Work. Catalog's read-heavy, low-write reference-data shape is exactly
+what those two modules need to call synchronously (see section 9), so
+co-locating it avoids a cross-service network hop for what should be a
+cheap, low-latency lookup. This also matches the modular-monolith-first
+philosophy docs/ARCHITECTURE.md section 1 already commits to: split into a
+standalone service only when real scale forces it, not speculatively.
+
+Proposed deployment facts:
+- Port: 6004 — shared with Demand Intake and Work Requirement, no new port.
+- Database: eswmp_work — shared, no new database.
+- Schema: catalog — new schema, sibling to demand and requirements, per the
+  schema-per-module convention in CLAUDE.md rule 11 and
+  docs/ARCHITECTURE.md section 1.2.
+- DbContext: WorkDbContext — extended with a CatalogEntry DbSet, mapped to
+  the catalog schema.
+- Controller: proposed CatalogEntriesController, new file under
+  src/Eswmp.Work/Controllers/.
+
+Future deployment option (proposed extraction trigger): very high read QPS
+from many consuming services/domains, a need to front lookups with a CDN or
+distributed cache independent of Eswmp.Work's own release cadence, or a
+tenant self-service catalog-authoring UI with its own scaling profile.
+
+## 4. Database(s)
+
+Database: eswmp_work (existing, shared — no new database created).
+Schema: catalog (new).
+Table: catalog.CatalogEntries — the sole table this module owns; see
+section 5 for its fields.
+
+Design choice — one generic entity, not three tables: Arch.jpeg's own label
+on the first bullet, "Service Catalog (Generic)", signals a deliberately
+generic shape rather than three parallel special-purpose tables
+(ServiceCatalogItems, WorkTypes, EquipmentTypes). A single CatalogEntry
+table with an EntryType discriminator column keeps all three governed
+vocabularies behind one create/publish/retire lifecycle and one lookup
+endpoint shape, consistent with CLAUDE.md rule 1's push toward generic,
+reusable constructs over near-duplicate vertical-specific ones. If a real
+need for type-specific fields emerges later (for example, Equipment Types
+needing a numeric capacity dimension that Work Types never would), the
+AttributesJson escape hatch (section 5) absorbs it without a schema split —
+and if that need turns out to be large and structural rather than a few
+optional fields, splitting into per-EntryType tables is the fallback,
+flagged here rather than assumed away.
+
+## 5. Data Model(s)
+
+All entities inherit TenantScopedEntity (Id, TenantId,
+CreatedAt/CreatedBy/UpdatedAt/UpdatedBy) from Eswmp.Shared.DTOs.
+
+CatalogEntry
+Table: catalog.CatalogEntries
+Role: aggregate root
+
+EntryType: CatalogEntryType enum (required)
+Notes: ServiceCatalogItem, WorkType, or EquipmentType — the three Arch.jpeg
+bullets, modeled as one discriminated value rather than three tables (see
+section 4)
+
+Code: string (required)
+Notes: Tenant-unique within EntryType. The opaque token other services
+already store today as an uncontrolled free string — see section 9
+
+DisplayName: string (required)
+Notes: Human-readable label
+
+Description: string?
+Notes: Optional free text
+
+ParentEntryId: Guid?
+Notes: Optional self-referential FK, same EntryType only — supports simple
+hierarchy, e.g. an EquipmentType entry "GroomingVan" under a parent
+"Vehicle"
+
+Status: CatalogEntryStatus enum, default Draft
+Notes: See lifecycle, section 7
+
+AttributesJson: string?, jsonb
+Notes: Open extension bag for tenant- or EntryType-specific metadata without
+a schema change — mirrors the jsonb escape hatch already used by
+Demand.LocationReference
+
+Version: int, default 1
+Notes: Optimistic concurrency — required as expectedVersion on PATCH,
+consistent with every module built during the 2026-07-07 reconciliation pass
+
+CatalogEntryType values:
+- ServiceCatalogItem
+- WorkType
+- EquipmentType
+
+CatalogEntryStatus values:
+- Draft
+- Active
+- Retired
+
+Unique index:
+- TenantId + EntryType + Code
+
+## 6. API(s)
+
+Base path (proposed): /api/v1/catalog-entries
+Contract (proposed): contracts/openapi/work.v1.yaml, extended — Catalog
+would share the existing Work service's contract file rather than start a
+new one, consistent with the module-not-service deployment choice in
+section 3.
+
+POST /
+Permission: catalog.manage
+Notes: Creates a Draft entry. Requires Idempotency-Key header, mirroring the
+domain-wide convention already established by Demand Intake and Work
+Requirement (see docs/API/INDEX.md, cross-cutting conventions). Returns 409
+CODE_ALREADY_EXISTS if TenantId + EntryType + Code already exists.
+
+GET /{id}
+Permission: catalog.read
+
+POST /search
+Permission: catalog.read
+Notes: Filters: entryType, status, code, parentEntryId, free-text on
+DisplayName. Paged (PagedResult<CatalogEntry>), matching the search pattern
+every other received spec uses.
+
+GET /by-code/{entryType}/{code}
+Permission: catalog.read
+Notes: The lookup path a caller uses to resolve and validate a code at
+write time — for example, Work Requirement resolving a WorkType value
+before accepting a RequirementTemplate. See section 9's open question on
+whether this call should be synchronous or replaced by a locally cached
+read-model.
+
+PATCH /{id}
+Permission: catalog.manage
+Notes: Requires expectedVersion (412 on mismatch). Mutability depends on
+status:
+- Draft = broadly mutable
+- Active = DisplayName, Description, AttributesJson only; EntryType, Code,
+  or ParentEntryId changes return 409
+- Retired = fully immutable, returns 409
+
+POST /{id}/publish
+Permission: catalog.manage
+Notes: Draft to Active. Publishes CatalogEntryPublishedEvent.
+
+POST /{id}/retire
+Permission: catalog.manage
+Notes: Active to Retired. Not reversible — a retired code that needs to
+return is created fresh, matching how Demand's terminal statuses work.
+Publishes CatalogEntryRetiredEvent.
+
+GET /entry-types
+Permission: catalog.read
+Notes: Returns the fixed three-value EntryType enum. Flagged in section 10
+as an open question — whether tenants should ever be able to register
+EntryTypes of their own beyond these three.
+
+Standard error shape, consistent with the domain's shared envelope:
+- { error: string, code: string, traceId: string, issues: [...] }
+
+## 7. Lifecycle (state machine)
+
+Draft --publish--> Active --retire--> Retired (terminal)
+Draft --retire--> Retired (terminal; an entry can be retired before ever
+being published, e.g. created in error)
+Active --publish--> rejected (409; already Active)
+
+## 8. Policies
+
+Idempotency:
+- POST / requires Idempotency-Key, matching Demand Intake and Work
+  Requirement's existing convention.
+
+Optimistic concurrency:
+- Every mutation after creation carries a Version counter.
+- PATCH requires the caller to supply the expectedVersion it last saw.
+- Mismatch returns 412 Precondition Failed.
+
+Status-dependent mutability:
+- Draft = broadly mutable
+- Active = DisplayName / Description / AttributesJson only
+- Retired = fully immutable
+- Enforced identically by PATCH, publish, and retire, mirroring the
+  ImmutableStatuses pattern Demand Intake already uses.
+
+Uniqueness:
+- TenantId + EntryType + Code enforced by a unique database index and an
+  explicit application-layer check ahead of the insert, returning 409
+  CODE_ALREADY_EXISTS rather than surfacing a raw database constraint
+  violation.
+
+Multi-tenancy:
+- CatalogEntry carries TenantId.
+- WorkDbContext applies HasQueryFilter on CatalogEntry, same as Demand and
+  the Work Requirement entities already do.
+
+Permissions:
+- catalog.manage gates every write, including publish and retire.
+- catalog.read gates get, search, by-code lookup, and entry-types.
+
+## 9. Domain Events
+
+Proposed, none built. Would be defined in Eswmp.Shared.Events.WorkEvents,
+published via IPublishEndpoint (MassTransit), matching Demand Intake and
+Work Requirement's existing pattern.
+
+CatalogEntryPublishedEvent
+Fields:
+- CatalogEntryId
+- TenantId
+- EntryType
+- Code
+- CorrelationId
+Fired on:
+- POST /{id}/publish
+
+CatalogEntryRetiredEvent
+Fields:
+- CatalogEntryId
+- TenantId
+- EntryType
+- Code
+- CorrelationId
+Fired on:
+- POST /{id}/retire
+
+Both carry only opaque platform identifiers, consistent with CLAUDE.md rule
+1 and the pattern every other domain event in this platform already
+follows.
+
+## 10. Reconciliation Notes — Where This Overlaps Already-Built Code
+
+Catalog has no code today, but Demand Intake and Work Requirement — both
+already implemented — carry several fields that are exactly the kind of
+governed vocabulary this spec proposes. Building Catalog without addressing
+these would create a second, competing source of truth:
+
+- Eswmp.Core's Resource module already has a ResourceType entity (resource
+  schema, src/Eswmp.Core/Models/ResourceExtras.cs) — a "tenant-defined
+  resource classification" with a Code, Name, and BaseType enum that
+  includes an Equipment value. This is a direct conceptual overlap with the
+  proposed EquipmentType CatalogEntryType. Resource.ResourceTypeId already
+  exists as an optional FK, but it points at Core's own ResourceType table,
+  not at any shared catalog. Whether Core's ResourceType should be retired
+  in favor of CatalogEntry(EntryType=EquipmentType), kept as-is with a
+  cross-reference added, or left alone entirely is an open question — see
+  section 11. This spec does not resolve it.
+- WorkRequirement.WorkType, WorkRequirement.WorkCategory
+  (src/Eswmp.Work/Models/WorkRequirement.cs), and
+  RequirementTemplate.WorkType (src/Eswmp.Work/Models/RequirementTemplate.cs)
+  are required or optional free-text strings today, with nothing validating
+  them against any registry. This is precisely the gap a WorkType
+  CatalogEntryType closes. Wiring that validation into Eswmp.Work's own
+  Work Requirement module would be real, separate follow-up work — nothing
+  about authoring this spec implies it has already been done.
+- Beyond Arch.jpeg's three named bullets, ResourceCapability.CapabilityCode,
+  ResourceSkill.SkillCode, and ResourceCertification.CertificationTypeCode
+  (Eswmp.Core) and the matching DefinitionCapabilityRequirement /
+  DefinitionSkillRequirement / DefinitionCertificationRequirement codes
+  (Eswmp.Work) are all free-text codes with the same underlying "governed
+  vocabulary" need. Out of scope for a first Catalog version — noted here
+  as the natural next extension once ServiceCatalogItem / WorkType /
+  EquipmentType prove the model out.
+
+## 11. Testing
+
+None — no code exists. A first implementation should follow the pattern
+already proven by Demand Intake and Work Requirement: unit tests for the
+lifecycle guards and idempotency/concurrency behavior in
+tests/unit/Eswmp.Work.Tests/, plus a Testcontainers-backed integration
+suite in tests/integration/Eswmp.Work.IntegrationTests/ covering
+create-to-get, uniqueness conflict, permission-denied, unauthenticated, and
+cross-tenant isolation.
+
+## 12. Not Yet Built (backlog)
+
+- Everything: the CatalogEntry model, migration, DbContext wiring,
+  CatalogEntriesController, contract additions to work.v1.yaml, and the two
+  domain events.
+- Any consumer wiring — Demand Intake and Work Requirement do not call
+  Catalog today because Catalog does not exist; section 9's open question
+  on synchronous-call versus cached-read-model should be settled before
+  that wiring is built, not decided implicitly by whichever gets built
+  first.
+- Reconciling Core's existing ResourceType against the proposed
+  EquipmentType CatalogEntryType (section 10).
+- AsyncAPI contract for CatalogEntryPublishedEvent /
+  CatalogEntryRetiredEvent, mirroring the same backlog item already open
+  for Demand Intake's three events (WK-10 in docs/TASK_BOARD.md).
+
+## 13. Open Workshop Questions
+
+1. Fixed vocabulary or tenant-extensible: should CatalogEntryType stay a
+   fixed three-value enum, or should tenants eventually be able to register
+   their own entry types — a meta-catalog? The API in section 6 assumes
+   fixed for now (GET /entry-types just returns the three built-in values).
+2. Core's ResourceType versus CatalogEntry(EquipmentType): retire,
+   cross-reference, or leave both as independently-owned, occasionally
+   inconsistent concepts? Section 10 raises this without resolving it.
+3. Synchronous lookup or event-driven local cache: should Demand Intake and
+   Work Requirement call GET /by-code/... synchronously at write time
+   (simple, but adds a network hop and an availability dependency to every
+   Demand and WorkRequirement create), or should each consumer keep a local
+   read-model kept current via CatalogEntryPublished/Retired (no
+   synchronous coupling, but eventually consistent and more moving parts)?
+   This mirrors the same trade-off the Scheduling Service Specification's
+   open question 1 raised for Capacity/Availability checks.
+4. Module inside Eswmp.Work, as recommended in section 3, or a standalone
+   service from day one, given that unlike Demand Intake and Work
+   Requirement, Catalog's read-heavy shape and total lack of write-side
+   business logic make it a plausible candidate for being fronted by a
+   cache or CDN independent of Eswmp.Work's release cadence sooner rather
+   than later?
