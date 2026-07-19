@@ -24,8 +24,18 @@ public static class HealthCheckExtensions
             builder.AddRedis(redisConnStr, name: "redis", tags: ["ready"]);
         }
 
+        // Gated on the actual configured transport, not just whether Host is
+        // non-blank — appsettings.json's base "Host": "localhost" default
+        // survives into every environment (Azure only overrides Transport,
+        // never clears Host), so checking presence alone made this fire
+        // (and always fail, since there's no RabbitMQ in Azure) even when
+        // MessageBus:Transport is AzureServiceBus. Confirmed live 2026-07-19:
+        // /health/ready reported 503 in the QA environment purely from this
+        // check, despite the actual configured message bus (Service Bus)
+        // being up and working ("Bus started: sb://...").
+        var transport = configuration["MessageBus:Transport"];
         var rabbitHost = configuration["MessageBus:Host"];
-        if (!string.IsNullOrWhiteSpace(rabbitHost))
+        if (string.Equals(transport, "RabbitMQ", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(rabbitHost))
         {
             var username = configuration["MessageBus:Username"] ?? "guest";
             var password = configuration["MessageBus:Password"] ?? "guest";

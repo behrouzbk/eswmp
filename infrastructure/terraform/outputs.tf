@@ -41,5 +41,8 @@ output "servicebus_connection_string" {
 
 output "gateway_url" {
   description = "Public HTTPS URL of the Gateway — the only externally reachable service"
-  value       = "https://${azurerm_container_app.gateway.latest_revision_fqdn}"
+  # Stable, revision-independent hostname — see the comment on Gateway's
+  # ReverseProxy env vars in container_apps.tf for why this isn't
+  # latest_revision_fqdn (that form changes on every new revision/deploy).
+  value = "https://${azurerm_container_app.gateway.ingress[0].fqdn}"
 }
