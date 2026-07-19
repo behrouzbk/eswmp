@@ -41,5 +41,5 @@ output "servicebus_connection_string" {
 
 output "gateway_url" {
   description = "Public HTTPS URL of the Gateway — the only externally reachable service"
-  value       = "https://${azurerm_container_app.services["gateway"].latest_revision_fqdn}"
+  value       = "https://${azurerm_container_app.gateway.latest_revision_fqdn}"
 }

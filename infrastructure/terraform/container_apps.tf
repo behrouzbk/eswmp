@@ -1,14 +1,9 @@
 # Per-service static config — kept free of any resource references so it can be
 # used as a for_each source (for_each's key set must be known at plan time).
 locals {
+  # "gateway" is deliberately not in this map — see the standalone
+  # azurerm_container_app.gateway resource below for why.
   services = {
-    gateway = {
-      image            = "eswmp-gateway"
-      external         = true
-      needs_db         = false
-      needs_messagebus = false
-      needs_redis      = false
-    }
     core = {
       image            = "eswmp-core"
       external         = false
@@ -175,22 +170,6 @@ resource "azurerm_container_app" "services" {
           secret_name = env.value
         }
       }
-
-      # Gateway routes to the other four services by internal FQDN — Container
-      # Apps assigns this only once the target app exists, so this reads the
-      # sibling resource instances created by this same for_each.
-      dynamic "env" {
-        for_each = each.key == "gateway" ? {
-          "ReverseProxy__Clusters__core__Destinations__primary__Address"       = "https://${azurerm_container_app.services["core"].latest_revision_fqdn}"
-          "ReverseProxy__Clusters__assignment__Destinations__primary__Address" = "https://${azurerm_container_app.services["assignment"].latest_revision_fqdn}"
-          "ReverseProxy__Clusters__rules__Destinations__primary__Address"      = "https://${azurerm_container_app.services["rules"].latest_revision_fqdn}"
-          "ReverseProxy__Clusters__work__Destinations__primary__Address"       = "https://${azurerm_container_app.services["work"].latest_revision_fqdn}"
-        } : {}
-        content {
-          name  = env.key
-          value = env.value
-        }
-      }
     }
   }
 
@@ -215,5 +194,108 @@ resource "azurerm_key_vault_access_policy" "container_app" {
   key_vault_id       = azurerm_key_vault.kv.id
   tenant_id          = data.azurerm_client_config.current.tenant_id
   object_id          = azurerm_container_app.services[each.key].identity[0].principal_id
+  secret_permissions = ["Get"]
+}
+
+# ── Gateway — a standalone resource, not part of the local.services for_each ──
+# It needs to reference the other four services' latest_revision_fqdn for its
+# YARP routing config. Referencing a sibling for_each instance's attribute
+# from within the *same* resource address is a well-known Terraform limitation
+# that produces a false-positive dependency cycle — confirmed live 2026-07-19
+# ("Cycle: azurerm_container_app.services[\"rules\"], [\"work\"], [\"assignment\"],
+# [\"core\"]") even though the real dependency is a clean one-directional DAG
+# (gateway -> the other four, never the reverse). Splitting gateway into its
+# own resource address turns this into a normal cross-resource reference,
+# which Terraform's graph builder handles correctly.
+resource "azurerm_container_app" "gateway" {
+  name                         = "eswmp-gateway-${var.environment}"
+  container_app_environment_id = azurerm_container_app_environment.env.id
+  resource_group_name          = azurerm_resource_group.main.name
+  revision_mode                = "Single"
+
+  identity {
+    type = "SystemAssigned"
+  }
+
+  dynamic "secret" {
+    for_each = local.jwt_secret_refs
+    content {
+      name                = secret.key
+      key_vault_secret_id = secret.value
+      identity            = "System"
+    }
+  }
+
+  template {
+    min_replicas = var.environment == "prod" ? 1 : 0
+    max_replicas = 5
+
+    container {
+      name   = "gateway"
+      image  = "${azurerm_container_registry.acr.login_server}/eswmp-gateway:latest"
+      cpu    = 0.5
+      memory = "1Gi"
+
+      env {
+        name  = "ASPNETCORE_ENVIRONMENT"
+        value = local.aspnetcore_environment[var.environment]
+      }
+      env {
+        name  = "Otel__ServiceName"
+        value = "Eswmp.Gateway"
+      }
+      env {
+        name  = "ApplicationInsights__ConnectionString"
+        value = azurerm_application_insights.appinsights.connection_string
+      }
+      env {
+        name        = "Jwt__SecretKey"
+        secret_name = "jwt-secret-key"
+      }
+      env {
+        name        = "Jwt__Issuer"
+        secret_name = "jwt-issuer"
+      }
+      env {
+        name        = "Jwt__Audience"
+        secret_name = "jwt-audience"
+      }
+
+      env {
+        name  = "ReverseProxy__Clusters__core__Destinations__primary__Address"
+        value = "https://${azurerm_container_app.services["core"].latest_revision_fqdn}"
+      }
+      env {
+        name  = "ReverseProxy__Clusters__assignment__Destinations__primary__Address"
+        value = "https://${azurerm_container_app.services["assignment"].latest_revision_fqdn}"
+      }
+      env {
+        name  = "ReverseProxy__Clusters__rules__Destinations__primary__Address"
+        value = "https://${azurerm_container_app.services["rules"].latest_revision_fqdn}"
+      }
+      env {
+        name  = "ReverseProxy__Clusters__work__Destinations__primary__Address"
+        value = "https://${azurerm_container_app.services["work"].latest_revision_fqdn}"
+      }
+    }
+  }
+
+  ingress {
+    external_enabled = true
+    target_port      = 8080
+
+    traffic_weight {
+      percentage      = 100
+      latest_revision = true
+    }
+  }
+
+  tags = local.common_tags
+}
+
+resource "azurerm_key_vault_access_policy" "container_app_gateway" {
+  key_vault_id       = azurerm_key_vault.kv.id
+  tenant_id          = data.azurerm_client_config.current.tenant_id
+  object_id          = azurerm_container_app.gateway.identity[0].principal_id
   secret_permissions = ["Get"]
 }

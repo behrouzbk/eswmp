@@ -26,9 +26,15 @@ resource "azurerm_postgresql_flexible_server" "postgres" {
   storage_mb             = var.environment == "prod" ? 65536 : 32768
   zone                   = "1"
 
-  high_availability {
-    mode                      = var.environment == "prod" ? "ZoneRedundant" : "Disabled"
-    standby_availability_zone = var.environment == "prod" ? "2" : null
+  # HA is disabled for non-prod by omitting this block entirely — the azurerm
+  # provider's high_availability.mode no longer accepts "Disabled" as a value
+  # (only "ZoneRedundant"/"SameZone"); the block's absence is what disables it.
+  dynamic "high_availability" {
+    for_each = var.environment == "prod" ? [1] : []
+    content {
+      mode                      = "ZoneRedundant"
+      standby_availability_zone = "2"
+    }
   }
 
   maintenance_window {
@@ -119,7 +125,9 @@ resource "azurerm_application_insights" "appinsights" {
 
 # ── Service Bus (MassTransit transport — staging/prod replacement for RabbitMQ) ─
 resource "azurerm_servicebus_namespace" "sb" {
-  name                = "${local.resource_prefix}-sb"
+  # Azure Service Bus namespace names may not end in "-sb" or "-mgmt" — confirmed
+  # live 2026-07-19 (`"name" cannot end with a hyphen, -sb, or -mgmt`).
+  name                = "${local.resource_prefix}-bus"
   resource_group_name = azurerm_resource_group.main.name
   location            = azurerm_resource_group.main.location
   # Standard tier required: MassTransit's Azure Service Bus transport uses topics
