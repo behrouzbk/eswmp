@@ -291,7 +291,7 @@ from whether the Resource's calendar is booked.
 | `PATCH /api/v1/capacity/definitions/{id}` | `capacity.write` | Update a definition |
 | `POST /api/v1/capacity/resolve` | `capacity.read` | `{ effectiveCapacity, consumedCapacity, heldCapacity, remainingCapacity, canFulfil }` for a window |
 | `POST /api/v1/capacity/explain` | `capacity.read` | Same computation, itemized (`definedCapacity`, `activeHolds`, `confirmedConsumption`) |
-| `POST /api/v1/capacity/holds` | `capacity.write` | Acquire a hold (requires `idempotencyKey`) — **currently 500s, see note below** |
+| `POST /api/v1/capacity/holds` | `capacity.write` | Acquire a hold (requires `idempotencyKey`) |
 | `GET /api/v1/capacity/holds/{id}` | `capacity.read` | Get a hold |
 | `POST /api/v1/capacity/holds/{id}/commit` | `capacity.write` | Hold → committed Consumption |
 | `POST /api/v1/capacity/holds/{id}/release` | `capacity.write` | Release an active hold |
@@ -317,15 +317,6 @@ Invoke-RestMethod -Method Post -Uri "$GW/api/v1/capacity/resolve" -Headers $Head
 `CapacityModel`, `CapacityUnit`, `CapacityTimeBasis` are enums defined in
 `src/Eswmp.Core/Models/` — check there for the full valid-value set if a
 `400` complains about an unrecognized string.
-
-> **Known issue, confirmed live 2026-07-19:** `POST /api/v1/capacity/holds`
-> currently returns `500` on every call, same root cause as the Matching
-> issue in §12 — `CapacityController.CreateHold` wraps its `SaveChangesAsync`
-> in a manually-created `BeginTransactionAsync`/`CommitAsync` pair, which the
-> `NpgsqlRetryingExecutionStrategy` on every service's DbContext
-> (`EnableRetryOnFailure(3)`) rejects. Not a request-shape problem. `/resolve`,
-> `/explain`, and the rest of the Capacity endpoints (no manual transaction)
-> are unaffected.
 
 ---
 
@@ -478,20 +469,6 @@ persisted and can be re-explained per candidate later.
 | `POST /api/v1/matching-policies` | `matching.execute` | Create a named policy (a container for weight-versions) |
 | `POST /api/v1/matching-policies/{id}/versions` | `matching.execute` | Add a Draft weight configuration |
 | `POST /api/v1/matching-policies/{id}/versions/{version}/activate` | `matching.execute` | Draft/Validated → Active (weights must sum to ~1.0) |
-
-> **Known issue, confirmed live 2026-07-19:** `POST /api/v1/matching/evaluations`
-> and `POST /api/v1/matching/evaluations/{id}/recalculate` currently return
-> `500` on every call — `MatchingController` wraps a single `SaveChangesAsync`
-> in a manually-created `BeginTransactionAsync`/`CommitAsync` pair, which
-> `NpgsqlRetryingExecutionStrategy` (enabled on every service's DbContext,
-> `EnableRetryOnFailure(3)`) rejects outright:
-> `InvalidOperationException: The configured execution strategy
-> 'NpgsqlRetryingExecutionStrategy' does not support user-initiated
-> transactions.` This is not a request-shape problem — don't spend time
-> tweaking the payload. See `src/Eswmp.Assignment/Controllers/MatchingController.cs`
-> (`Evaluate`/`Recalculate`) for the fix once one lands; `GET
-> /api/v1/matching/evaluations/{id}` and the policy endpoints below are
-> unaffected (no manual transaction).
 
 **Evaluate without a custom policy (uses the built-in "Balanced" strategy):**
 
