@@ -6,8 +6,11 @@
 > **Companion docs:** `docs/Azure/DEPLOYMENT-WORKFLOW-GUIDE.md` (deploying
 > code/infra changes to QA), `docs/api/INDEX.md` (the target domain map this
 > platform is being built against).
-> **Last updated:** 2026-07-24 (§15: Demand Intake v2 delta — NeedsAttention lifecycle,
-> triage/ownership, split/merge, bulk actions, metrics, audit; previously 2026-07-23, §18: fixed
+> **Last updated:** 2026-07-24 (§15: fixed the NeedsAttention walkthrough — `Create()` rejects
+> Error-severity issues up front, so a Scheduled-with-no-window demand never gets created; the
+> example now creates OnDemand, PATCHes to Scheduled, then validates, confirmed live against QA;
+> previously same day, §15: Demand Intake v2 delta — NeedsAttention lifecycle, triage/ownership,
+> split/merge, bulk actions, metrics, audit; before that, 2026-07-23, §18: fixed
 > the `$demand.id`/undefined-variable trap in the resolve example and flagged `explain`'s distinct
 > `workrequirement.explain` permission requirement; before that, a UTF-8 BOM bug in
 > `generate-qa-jwt.ps1`/`generate-ts-client.ps1` breaking Windows PowerShell 5.1).
@@ -650,12 +653,20 @@ status.
 **v2 delta — NeedsAttention, triage, split/merge:**
 
 ```powershell
-# Force a validation failure (Scheduled with no window) to see the NeedsAttention transition
+# Create() runs the same rule set /validate does and rejects Error-severity issues up
+# front (see the comment on DemandsController.Create) — so a demand that's Invalid from
+# the start (e.g. Scheduled with no window right at creation) never gets created; it's a
+# plain 400, not a route to NeedsAttention. To reach NeedsAttention you need a demand that
+# passes Create's gate, then becomes invalid afterward — create OnDemand (no window
+# needed), PATCH it to Scheduled (Received is broadly mutable), then validate:
 $headers2 = $Headers + @{ "Idempotency-Key" = [guid]::NewGuid().ToString() }
 $badDemand = Invoke-RestMethod -Method Post -Uri "$GW/api/v1/demands" -Headers $headers2 -ContentType "application/json" -Body (@{
     demandType = "ServiceVisit"; sourceSystem = "remote-test"
     externalReferenceType = "test-booking"; externalReferenceId = "TEST-BAD-001"
-    fulfillmentMode = "Scheduled"
+    fulfillmentMode = "OnDemand"
+} | ConvertTo-Json)
+Invoke-RestMethod -Method Patch -Uri "$GW/api/v1/demands/$($badDemand.id)" -Headers $Headers -ContentType "application/json" -Body (@{
+    expectedVersion = $badDemand.version; fulfillmentMode = "Scheduled"
 } | ConvertTo-Json)
 Invoke-RestMethod -Method Post -Uri "$GW/api/v1/demands/$($badDemand.id)/validate" -Headers $Headers -ContentType "application/json" -Body '{}'
 $flagged = Invoke-RestMethod -Uri "$GW/api/v1/demands/$($badDemand.id)" -Headers $Headers
