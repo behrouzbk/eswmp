@@ -1027,7 +1027,7 @@ components:
         assignedRole: { allOf: [{ $ref: '#/components/schemas/DemandAttentionOwner' }], nullable: true }
         attentionReason: { type: string, nullable: true, description: Required whenever status = NeedsAttention. }
         attentionIssuesJson: { type: string, nullable: true, description: "jsonb — snapshot of issues[] or the resolution failure detail." }
-        resolutionAttempts: { type: integer, description: Counted, not capped — see the v2 delta's open D-02 product decision. }
+        resolutionAttempts: { type: integer, description: "Counted, not capped — see the v2 delta's open D-02 product decision." }
         lastResolutionError: { type: string, nullable: true }
         recurrenceRule: { type: string, nullable: true, description: RFC 5545 RRULE. Only meaningful when fulfillmentMode = Recurring. }
         seriesId: { type: string, format: uuid, nullable: true }
@@ -1227,7 +1227,7 @@ components:
       type: object
       required: [changeType, occurredAt]
       properties:
-        changeType: { type: string, description: e.g. Created, Validated, Accepted, FlaggedForAttention, Assigned, Escalated, Split, Merged. }
+        changeType: { type: string, description: "e.g. Created, Validated, Accepted, FlaggedForAttention, Assigned, Escalated, Split, Merged." }
         fromStatus: { allOf: [{ $ref: '#/components/schemas/DemandStatus' }], nullable: true }
         toStatus: { allOf: [{ $ref: '#/components/schemas/DemandStatus' }], nullable: true }
         actorId: { type: string, nullable: true }
