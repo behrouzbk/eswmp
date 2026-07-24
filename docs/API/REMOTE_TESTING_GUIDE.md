@@ -6,7 +6,10 @@
 > **Companion docs:** `docs/Azure/DEPLOYMENT-WORKFLOW-GUIDE.md` (deploying
 > code/infra changes to QA), `docs/api/INDEX.md` (the target domain map this
 > platform is being built against).
-> **Last updated:** 2026-07-23 (fixed a UTF-8 BOM bug in `generate-qa-jwt.ps1`/`generate-ts-client.ps1` breaking Windows PowerShell 5.1).
+> **Last updated:** 2026-07-23 (§18: fixed the `$demand.id`/undefined-variable trap in the resolve
+> example and flagged `explain`'s distinct `workrequirement.explain` permission requirement, both
+> found live-testing the v2 delta walkthrough; previously fixed a UTF-8 BOM bug in
+> `generate-qa-jwt.ps1`/`generate-ts-client.ps1` breaking Windows PowerShell 5.1).
 
 ---
 
@@ -780,13 +783,20 @@ operation is **resolve**: Demand + Template → an operational `WorkRequirement`
 $headers2 = $Headers + @{ "Idempotency-Key" = [guid]::NewGuid().ToString() }
 $resolveBody = @{
     sourceType   = "Demand"
-    sourceId     = $demand.id
+    sourceId     = "test-demand-001"
     templateCode = "TEST-TPL-001"
 } | ConvertTo-Json
 
 $wr = Invoke-RestMethod -Method Post -Uri "$GW/api/v1/work-requirements/resolve" -Headers $headers2 -ContentType "application/json" -Body $resolveBody
 $wr
 Invoke-RestMethod -Uri "$GW/api/v1/work-requirements/$($wr.workRequirementId)/resolved" -Headers $Headers
+
+# Requires the `workrequirement.explain` permission specifically -- it is NOT
+# covered by `workrequirement.read`, deliberately (explainability is a
+# different authority than a plain read). A valid token missing this
+# permission gets 403 here, even though every other GET above succeeds with
+# `workrequirement.read` alone. If you get 403, re-mint your token with
+# `workrequirement.explain` added -- see §2.
 Invoke-RestMethod -Uri "$GW/api/v1/work-requirements/$($wr.workRequirementId)/explain" -Headers $Headers
 ```
 
@@ -797,7 +807,16 @@ Invoke-RestMethod -Uri "$GW/api/v1/work-requirements/$($wr.workRequirementId)/ex
 `resolve` requires the named `templateCode` to have an **Active** version —
 `409 TEMPLATE_NOT_ACTIVE` otherwise, so run §17's activate step first.
 `sourceType`/`sourceId` don't have to reference a real `Demand` for testing
-purposes — they're recorded, not dereferenced.
+purposes — they're recorded, not dereferenced; use any non-empty string, as
+above. Do **not** reference a `$demand` variable here unless you actually ran
+the separate §15 Demand Intake walkthrough in this same session — an
+undefined PowerShell variable evaluates to `$null` rather than erroring,
+so `sourceId = $demand.id` silently becomes `sourceId = null` in the request
+body. `SourceId` is a required field, so that produces a bare
+`400 Bad Request` from ASP.NET Core's model validation (not the domain's
+`{error,code,traceId}` envelope) — and every subsequent call in this walkthrough
+then 404s too, since `$wr` was never assigned and `$wr.workRequirementId` is
+empty, producing a malformed URL like `.../work-requirements//resolved`.
 
 **Revise (bump a capacity requirement):**
 
@@ -904,6 +923,7 @@ reservation.create, reservation.confirm`.
 | `401 Unauthorized` | Token missing, expired, or signed with the wrong key | Re-check the `Authorization: Bearer` header; mint a new token |
 | `403 Forbidden` | Token is valid but lacks the endpoint's required permission | Check the "Permission" column above; mint a new token with it added |
 | `404 Not Found` on a `GET` right after a `POST` | Usually a different `tenant_id` between the two calls | Reuse the same token for the whole session |
+| A chain of `404`s right after an unrelated-looking `400` a few lines earlier | The `POST`/create call failed (often silently, e.g. a `$variable` you never set evaluated to `$null` instead of erroring), so the id variable you're interpolating into later URLs (e.g. `$wr.workRequirementId`) is empty, producing a malformed URL like `.../work-requirements//resolved` | Fix the original `400` first — check the response body of the *first* failing call, not the later `404`s |
 | Empty `items: []` on every list/search | QA has no seeded data for a fresh `tenant_id` | Create data first, or ask for a token scoped to an existing tenant |
 | `503` on the very first call of a session | `min_replicas = 0` cold start | Retry 2-3 times, a few seconds apart |
 | `GET /` (bare Gateway URL) → `404` in a browser | Expected — the Gateway only proxies specific `/api/v1/...` and `/health` routes, nothing is mapped at `/` | Call a real API path, not the bare URL |
