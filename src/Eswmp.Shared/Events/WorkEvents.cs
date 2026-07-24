@@ -22,6 +22,46 @@ public record DemandCancelledEvent(
     Guid TenantId,
     Guid CorrelationId);
 
+// ── Demand Intake v2 delta (docs/API/specs/update_demand-schema.sql) ──────────
+// Published the same way as the three events above — a direct IPublishEndpoint.Publish
+// after SaveChangesAsync, not the Work Requirement module's transactional outbox (a
+// deliberate scope decision: match Demand's existing pattern, not introduce new
+// infrastructure). retry-resolution has no event of its own — it re-publishes
+// DemandAcceptedEvent, since DemandAcceptedConsumer already knows how to handle it.
+
+public record DemandNeedsAttentionEvent(
+    Guid DemandId,
+    Guid TenantId,
+    string AttentionReason,
+    Guid CorrelationId);
+
+public record DemandAssignedEvent(
+    Guid DemandId,
+    Guid TenantId,
+    string? AssignedTo,
+    string? AssignedRole,
+    Guid CorrelationId);
+
+public record DemandEscalatedEvent(
+    Guid DemandId,
+    Guid TenantId,
+    string FromPriority,
+    string ToPriority,
+    string? Reason,
+    Guid CorrelationId);
+
+public record DemandSplitEvent(
+    Guid ParentDemandId,
+    Guid TenantId,
+    IReadOnlyList<Guid> ChildDemandIds,
+    Guid CorrelationId);
+
+public record DemandMergedEvent(
+    Guid SurvivorDemandId,
+    Guid TenantId,
+    IReadOnlyList<Guid> MergedDemandIds,
+    Guid CorrelationId);
+
 // ── Requirement Definition (first-generation Work Requirement model) ──────────
 // See the provenance note on Eswmp.Work.Models.RequirementDefinition.
 

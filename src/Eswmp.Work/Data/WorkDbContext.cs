@@ -11,6 +11,8 @@ public class WorkDbContext(DbContextOptions<WorkDbContext> options, ITenantConte
     public DbSet<Demand> Demands => Set<Demand>();
     public DbSet<DemandValidationResult> DemandValidationResults => Set<DemandValidationResult>();
     public DbSet<DemandIdempotencyRecord> DemandIdempotencyRecords => Set<DemandIdempotencyRecord>();
+    public DbSet<DemandLineage> DemandLineages => Set<DemandLineage>();
+    public DbSet<DemandAuditEntry> DemandAuditEntries => Set<DemandAuditEntry>();
 
     // Requirement Definition module (first-generation Work Requirement model — see the
     // provenance note on Eswmp.Work.Models.RequirementDefinition)
@@ -52,9 +54,23 @@ public class WorkDbContext(DbContextOptions<WorkDbContext> options, ITenantConte
         // ── Demand Intake module — schema "demand" ──────────────────────
         modelBuilder.Entity<Demand>(e =>
         {
-            e.ToTable("Demands", schema: "demand", t => t.HasCheckConstraint(
-                "CK_Demands_TimeWindow",
-                "\"RequestedStartAtUtc\" IS NULL OR \"RequestedEndAtUtc\" IS NULL OR \"RequestedStartAtUtc\" < \"RequestedEndAtUtc\""));
+            e.ToTable("Demands", schema: "demand", t =>
+            {
+                t.HasCheckConstraint(
+                    "CK_Demands_TimeWindow",
+                    "\"RequestedStartAtUtc\" IS NULL OR \"RequestedEndAtUtc\" IS NULL OR \"RequestedStartAtUtc\" < \"RequestedEndAtUtc\"");
+                // v2 delta: a demand in NeedsAttention must say why — prevents a dead-end
+                // state no operator can action. NeedsAttention is ordinal 7 (see DemandStatus).
+                t.HasCheckConstraint(
+                    "CK_Demands_AttentionReason",
+                    "\"Status\" <> 7 OR \"AttentionReason\" IS NOT NULL");
+                // v2 delta: recurrence is only meaningful for the Recurring fulfillment mode
+                // (ordinal 2 — see DemandFulfillmentMode: Scheduled=0, OnDemand=1, Recurring=2, Standby=3).
+                t.HasCheckConstraint(
+                    "CK_Demands_Recurrence",
+                    "\"RecurrenceRule\" IS NULL OR \"FulfillmentMode\" = 2");
+                t.HasCheckConstraint("CK_Demands_Attempts", "\"ResolutionAttempts\" >= 0");
+            });
             e.HasQueryFilter(x => x.TenantId == tenantContext.TenantId);
             e.Property(x => x.LocationReference).HasColumnType("jsonb");
             e.Property(x => x.FulfillmentMode).HasDefaultValue(DemandFulfillmentMode.Scheduled);
@@ -62,10 +78,17 @@ public class WorkDbContext(DbContextOptions<WorkDbContext> options, ITenantConte
             // makes SaveChangesAsync itself the atomic guard (DbUpdateConcurrencyException on
             // a lost race), not just the in-memory check that runs before it.
             e.Property(x => x.Version).IsConcurrencyToken();
+            e.Property(x => x.AttentionIssuesJson).HasColumnType("jsonb");
             // Covers POST /search (tenant + status + created-date range, priority/demandType secondary).
             e.HasIndex(x => new { x.TenantId, x.Status, x.CreatedAt });
             // Lookups by the caller-domain pointer (e.g. reconciliation).
             e.HasIndex(x => new { x.TenantId, x.ExternalReferenceType, x.ExternalReferenceId });
+            // v2 delta: the dispatcher's triage queue — partial index on NeedsAttention only.
+            e.HasIndex(x => new { x.TenantId, x.AssignedRole, x.CreatedAt })
+                .HasFilter("\"Status\" = 7");
+            // v2 delta: recurring series lookup.
+            e.HasIndex(x => new { x.TenantId, x.SeriesId })
+                .HasFilter("\"SeriesId\" IS NOT NULL");
         });
 
         modelBuilder.Entity<DemandValidationResult>(e =>
@@ -89,6 +112,32 @@ public class WorkDbContext(DbContextOptions<WorkDbContext> options, ITenantConte
             // RESTRICT (not CASCADE): an idempotency record is the receipt of a create — it
             // should outlive casual deletes so replays stay correct.
             e.HasOne<Demand>().WithMany().HasForeignKey(x => x.DemandId).OnDelete(DeleteBehavior.Restrict);
+        });
+
+        // v2 delta: split/merge provenance.
+        modelBuilder.Entity<DemandLineage>(e =>
+        {
+            e.ToTable("DemandLineage", schema: "demand", t => t.HasCheckConstraint(
+                "CK_Lineage_NotSelf", "\"DemandId\" <> \"RelatedId\""));
+            e.HasQueryFilter(x => x.TenantId == tenantContext.TenantId);
+            e.HasIndex(x => new { x.TenantId, x.DemandId });
+            e.HasIndex(x => new { x.TenantId, x.RelatedId });
+            // The child/merged-away side cascades with its own Demand row; the parent/
+            // survivor side is Restrict — a lineage edge should not vanish just because
+            // the surviving demand happens to be deleted (mirrors IdempotencyRecords above).
+            e.HasOne<Demand>().WithMany().HasForeignKey(x => x.DemandId).OnDelete(DeleteBehavior.Cascade);
+            e.HasOne<Demand>().WithMany().HasForeignKey(x => x.RelatedId).OnDelete(DeleteBehavior.Restrict);
+        });
+
+        // v2 delta: real audit trail — replaces the always-empty GET /{id}/history.
+        modelBuilder.Entity<DemandAuditEntry>(e =>
+        {
+            e.ToTable("DemandAuditEntries", schema: "demand");
+            e.HasQueryFilter(x => x.TenantId == tenantContext.TenantId);
+            e.Property(x => x.BeforeSummary).HasColumnType("jsonb");
+            e.Property(x => x.AfterSummary).HasColumnType("jsonb");
+            e.HasIndex(x => new { x.TenantId, x.DemandId, x.OccurredAt });
+            e.HasOne<Demand>().WithMany().HasForeignKey(x => x.DemandId).OnDelete(DeleteBehavior.Cascade);
         });
 
         // ── Requirement Definition module — schema "requirements" ───────

@@ -6,9 +6,10 @@
 > **Companion docs:** `docs/Azure/DEPLOYMENT-WORKFLOW-GUIDE.md` (deploying
 > code/infra changes to QA), `docs/api/INDEX.md` (the target domain map this
 > platform is being built against).
-> **Last updated:** 2026-07-23 (§18: fixed the `$demand.id`/undefined-variable trap in the resolve
-> example and flagged `explain`'s distinct `workrequirement.explain` permission requirement, both
-> found live-testing the v2 delta walkthrough; previously fixed a UTF-8 BOM bug in
+> **Last updated:** 2026-07-24 (§15: Demand Intake v2 delta — NeedsAttention lifecycle,
+> triage/ownership, split/merge, bulk actions, metrics, audit; previously 2026-07-23, §18: fixed
+> the `$demand.id`/undefined-variable trap in the resolve example and flagged `explain`'s distinct
+> `workrequirement.explain` permission requirement; before that, a UTF-8 BOM bug in
 > `generate-qa-jwt.ps1`/`generate-ts-client.ps1` breaking Windows PowerShell 5.1).
 
 ---
@@ -582,14 +583,24 @@ the front door before a `WorkRequirement` exists (§18).
 | Method & Path | Permission | Purpose | Idempotency-Key required? |
 | --- | --- | --- | --- |
 | `POST /api/v1/demands` | `demand.create` | Create + auto-validate a demand | **Yes** |
-| `GET /api/v1/demands/{id}` | `demand.read` | Get one | — |
-| `POST /api/v1/demands/search` | `demand.read` | Paged search (filters: `status`, `priority`, `demandType`, `fulfillmentMode`, `fromUtc`, `toUtc`) | — |
+| `GET /api/v1/demands/{id}` | `demand.read` | Get one, now includes `externalStatus` (v2 delta) | — |
+| `POST /api/v1/demands/search` | `demand.read` | Paged search (filters: `status`, `priority`, `demandType`, `fulfillmentMode`, `fromUtc`, `toUtc`), items now include `externalStatus` (v2 delta) | — |
 | `PATCH /api/v1/demands/{id}` | `demand.create` | Update mutable fields (optimistic concurrency via `expectedVersion`) | — |
-| `POST /api/v1/demands/{id}/validate` | `demand.create` | Re-run validation | — |
+| `POST /api/v1/demands/{id}/validate` | `demand.create` | Re-run validation — Error-level issues now move the demand to `NeedsAttention` (v2 delta; was: stays `Received`) | — |
 | `POST /api/v1/demands/{id}/accept` | `demand.transition` | Ready → Accepted | — |
 | `POST /api/v1/demands/{id}/reject` | `demand.transition` | → Rejected (requires `reasonCode`) | — |
 | `POST /api/v1/demands/{id}/cancel` | `demand.transition` | → Cancelled | — |
-| `GET /api/v1/demands/{id}/history` | `demand.read` | Always `[]` today — no audit trail table exists yet | — |
+| `GET /api/v1/demands/{id}/history` | `demand.read` | v2 delta, revised — was always `[]`; now the real audit trail (same shape as `{id}/audit` below) | — |
+| `POST /api/v1/demands/{id}/flag-attention` | `demand.transition` | v2 delta, new — move to `NeedsAttention` with a reason | — |
+| `POST /api/v1/demands/{id}/retry-resolution` | `demand.transition` | v2 delta, new — only from `NeedsAttention`; re-emits the accepted event | — |
+| `POST /api/v1/demands/{id}/assign` | `demand.assign` | v2 delta, new — set `assignedTo`/`assignedRole` | — |
+| `POST /api/v1/demands/{id}/escalate` | `demand.escalate` | v2 delta, new — raise `priority` with a reason | — |
+| `POST /api/v1/demands/bulk/accept`, `bulk/reject`, `bulk/cancel` | `demand.transition` | v2 delta, new — per-item results (`{ results: [{ id, success, error? }] }`) | — |
+| `GET /api/v1/demands/metrics` | `demand.read` | v2 delta, new — counts by status/mode/priority/age band | — |
+| `POST /api/v1/demands/{id}/split` | `demand.split` | v2 delta, new — creates N children, records lineage; parent is not auto-cancelled | — |
+| `POST /api/v1/demands/merge` | `demand.merge` | v2 delta, new — each `mergedId` → `Cancelled` + lineage | — |
+| `GET /api/v1/demands/{id}/audit` | `demand.read` | v2 delta, new — unified audit trail | — |
+| `GET /api/v1/demands/history?externalReferenceType=&externalReferenceId=` | `demand.read` | v2 delta, new — customer-scoped, customer-safe fields only | — |
 
 `Idempotency-Key` is a required **header** (not body field) on `POST
 /api/v1/demands` — a missing header is a `400 VALIDATION_FAILED`, a repeat of
@@ -619,16 +630,59 @@ Invoke-RestMethod -Method Post -Uri "$GW/api/v1/demands/$($demand.id)/validate" 
 ```
 
 Valid enums: `DemandStatus` = `Received, Validating, Ready, Accepted,
-Rejected, Cancelled, Expired`; `DemandPriority` = `Low, Normal, High, Urgent,
+Rejected, Cancelled, Expired, NeedsAttention` (v2 delta — non-terminal,
+reachable from `Received` on a validation error and from `Accepted` on a
+downstream resolution failure); `DemandPriority` = `Low, Normal, High, Urgent,
 Critical`; `DemandFulfillmentMode` = `Scheduled, OnDemand, Recurring,
 Standby` (a `Scheduled` demand *requires* both
 `requestedStartAtUtc`/`requestedEndAtUtc` or validation flags an `Error`).
+`ExternalDemandStatus` (v2 delta, returned as `externalStatus` on `GET
+/{id}` and `search`) = `Submitted, Received, Confirmed, NeedsAttention,
+Cancelled` — a customer-safe projection, never the raw 8-value internal
+status.
 
 **Error envelope example** (missing Idempotency-Key header):
 
 ```json
 { "error": "The Idempotency-Key header is required.", "code": "VALIDATION_FAILED", "traceId": "00-...-01" }
 ```
+
+**v2 delta — NeedsAttention, triage, split/merge:**
+
+```powershell
+# Force a validation failure (Scheduled with no window) to see the NeedsAttention transition
+$headers2 = $Headers + @{ "Idempotency-Key" = [guid]::NewGuid().ToString() }
+$badDemand = Invoke-RestMethod -Method Post -Uri "$GW/api/v1/demands" -Headers $headers2 -ContentType "application/json" -Body (@{
+    demandType = "ServiceVisit"; sourceSystem = "remote-test"
+    externalReferenceType = "test-booking"; externalReferenceId = "TEST-BAD-001"
+    fulfillmentMode = "Scheduled"
+} | ConvertTo-Json)
+Invoke-RestMethod -Method Post -Uri "$GW/api/v1/demands/$($badDemand.id)/validate" -Headers $Headers -ContentType "application/json" -Body '{}'
+$flagged = Invoke-RestMethod -Uri "$GW/api/v1/demands/$($badDemand.id)" -Headers $Headers
+$flagged.status           # "NeedsAttention"
+$flagged.attentionReason  # "VALIDATION_FAILED"
+
+# Assign, escalate, then flag-attention manually with a custom reason
+Invoke-RestMethod -Method Post -Uri "$GW/api/v1/demands/$($badDemand.id)/assign" -Headers $Headers -ContentType "application/json" -Body (@{ assignedTo = "dispatcher-1"; assignedRole = "Dispatcher" } | ConvertTo-Json)
+Invoke-RestMethod -Method Post -Uri "$GW/api/v1/demands/$($badDemand.id)/escalate" -Headers $Headers -ContentType "application/json" -Body (@{ priority = "Urgent"; reason = "SLA at risk" } | ConvertTo-Json)
+
+# Split into two, then check the audit trail (any non-terminal demand works — using
+# $badDemand from above rather than introducing another undefined-variable trap)
+$split = Invoke-RestMethod -Method Post -Uri "$GW/api/v1/demands/$($badDemand.id)/split" -Headers $Headers -ContentType "application/json" -Body (@{
+    children = @(@{ summary = "Visit 1" }, @{ summary = "Visit 2" })
+    reason   = "Customer wants two separate visits"
+} | ConvertTo-Json -Depth 6)
+Invoke-RestMethod -Uri "$GW/api/v1/demands/$($badDemand.id)/audit" -Headers $Headers
+
+# Metrics
+Invoke-RestMethod -Uri "$GW/api/v1/demands/metrics" -Headers $Headers
+```
+
+`retry-resolution` only works from `NeedsAttention` — it re-emits
+`DemandAcceptedEvent` so `DemandAcceptedConsumer` re-attempts resolution
+asynchronously; a successful retry clears `NeedsAttention` and returns the
+demand to `Accepted` with `requirementReferenceId` set. `escalate` requires
+raising priority — the same or lower value returns `400 VALIDATION_FAILED`.
 
 ---
 

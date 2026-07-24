@@ -426,3 +426,88 @@ validate-writes-on-every-call behaviour. Everything marked REC ---
 foreign keys, indexes, the check constraint, RLS, enum storage --- is a
 recommendation to verify against the codebase before it is stated as
 fact.*
+
+**5. v2 Delta (2026-07-24)**
+
+*Source: docs/API/specs/update_demand-schema.sql,
+docs/API/specs/v2-delta-summary.docx §2. Closes R6's "no history/audit
+table" backlog item above with a real DemandAuditEntries table.*
+
+**5.1 demand.Demands additions**
+
+  -----------------------------------------------------------------------
+  **Column**                       **Type / notes**
+  --------------------------------- -------------------------------------
+  AssignedTo                        varchar, null. Actor id or queue
+                                    name.
+
+  AssignedRole                      attention_owner (int column, see
+                                    §5.4), null.
+
+  AttentionReason                   varchar, null. Required whenever
+                                    Status = NeedsAttention
+                                    (CK_Demands_AttentionReason).
+
+  AttentionIssuesJson                jsonb, null.
+
+  ResolutionAttempts                 int, default 0. CK_Demands_Attempts
+                                    (\>= 0). Counted, not capped --- open
+                                    D-02 decision.
+
+  LastResolutionError                varchar, null.
+
+  RecurrenceRule                     varchar, null. RFC 5545 RRULE.
+                                    CK_Demands_Recurrence: only valid when
+                                    FulfillmentMode = Recurring.
+
+  SeriesId                           uuid, null.
+  -----------------------------------------------------------------------
+
+New indexes: IX_Demands_Attention (TenantId, AssignedRole, CreatedAt)
+filtered WHERE Status = NeedsAttention --- the dispatcher's triage queue;
+IX_Demands_Series (TenantId, SeriesId) filtered WHERE SeriesId IS NOT
+NULL.
+
+**5.2 demand.DemandLineage (new table)**
+
+Split and merge provenance. DemandId/RelatedId are the child/merged-away
+and parent/surviving demand respectively; Relation is SplitFrom or
+MergedInto. FK on DemandId cascades (a lineage edge for a deleted child
+is meaningless); FK on RelatedId restricts (a lineage edge should not
+vanish just because the surviving demand happens to be deleted).
+CK_Lineage_NotSelf: DemandId \<\> RelatedId.
+
+**5.3 demand.DemandAuditEntries (new table)**
+
+Real audit trail --- closes R6's backlog item. One row per state change
+or material mutation (Created, Validated, Accepted, Rejected, Cancelled,
+FlaggedForAttention, ResolutionRetryRequested/Succeeded, Assigned,
+Escalated, Split, Merged, CreatedViaSplit). FromStatus/ToStatus,
+ActorId/ActorRole, CorrelationId, Reason, and a small
+BeforeSummary/AfterSummary jsonb pair for changes that aren't a status
+transition (e.g. the priority change on Escalate). GET /demands/{id}
+/history (previously always \[\]) and the new GET /demands/{id}/audit
+both read this table.
+
+**5.4 Enum storage --- reconciling with R4**
+
+R4 flagged that Status/Priority "are modelled as native enum types" in
+this spec's DDL but recommended confirming the as-built column type
+before treating that as fact. As-built, confirmed: **every enum on
+Demand, including the two new ones this delta adds
+(demand_status.NeedsAttention, attention_owner), is a plain integer
+column** via EF's default enum-to-int convention --- there is no native
+Postgres enum type anywhere in WorkDbContext.cs, consistent with the rest
+of this schema and with the Work Requirement module's `VisibilityLevel`
+addition. **NeedsAttention was appended last (ordinal 7)**, not inserted
+at this update's DDL position (4th) --- an int-column enum has no
+`HasConversion`, so inserting mid-list would silently reshuffle every
+later status's stored meaning in the live database. The same class of
+bug R4 was written to guard against, now realized concretely.
+
+*Established by this delta: 8 new/changed Demands columns, 2 new
+indexes, 2 new tables (DemandLineage, DemandAuditEntries), and the
+enum-ordinal-safety note in §5.4 --- the last of which corrects a gap
+between this update's DDL (a native Postgres enum) and the as-built
+convention (plain integer), the same category of confirm-before-fact
+gap R4 already existed to catch.*

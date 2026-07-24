@@ -82,11 +82,11 @@ paths:
         - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
       responses:
         '200':
-          description: Demand detail
+          description: Demand detail (v2 delta — now includes externalStatus)
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Demand'
+                $ref: '#/components/schemas/DemandWithExternalStatus'
         '404':
           description: Not found (code=NOT_FOUND)
           content:
@@ -215,21 +215,293 @@ paths:
     get:
       tags: [Demands]
       summary: >
-        Demand status/change history. No dedicated audit table exists yet for
-        Eswmp.Work — returns an empty list for MVP rather than 404/501, so
-        callers can integrate against the final shape now.
+        v2 delta (revised) — was always an empty list (no audit table existed).
+        Now returns the real DemandAuditEntries trail; same shape as the new
+        GET /{id}/audit below.
       parameters:
         - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
       responses:
         '200':
-          description: History entries (currently always empty)
+          description: Audit entries, oldest first
           content:
             application/json:
               schema:
                 type: array
-                items: {}
+                items: { $ref: '#/components/schemas/DemandAuditEntry' }
         '404':
           description: Demand not found (code=NOT_FOUND)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+
+  # ── v2 delta additions below (docs/API/specs/update_demand-schema.sql,
+  # docs/API/specs/v2-delta-summary.docx §2) ──────────────────────────────────
+
+  /api/v1/demands/{id}/flag-attention:
+    post:
+      tags: [Demands]
+      summary: >
+        v2 delta (P1, new, UX-10) — move a demand to NeedsAttention with a
+        reason. Requires demand.transition.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/FlagAttentionRequest' }
+      responses:
+        '200':
+          description: Demand flagged NeedsAttention
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Demand' }
+        '400':
+          description: reason missing (code=VALIDATION_FAILED)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+        '409':
+          description: Demand already in an immutable status (code=STATUS_CONFLICT)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+
+  /api/v1/demands/{id}/retry-resolution:
+    post:
+      tags: [Demands]
+      summary: >
+        v2 delta (P1, new, UX-14) — re-emits the accepted event so
+        DemandAcceptedConsumer re-attempts resolution; bounded by
+        resolutionAttempts but not capped (open product decision). Requires
+        demand.transition.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: Retry requested (resolution happens asynchronously)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Demand' }
+        '409':
+          description: Demand is not NeedsAttention (code=STATUS_CONFLICT)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+
+  /api/v1/demands/{id}/assign:
+    post:
+      tags: [Demands]
+      summary: v2 delta (P3, new, UX-10) — set triage ownership. Requires demand.assign.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AssignDemandRequest' }
+      responses:
+        '200':
+          description: Updated Demand
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Demand' }
+        '409':
+          description: Demand already in an immutable status (code=STATUS_CONFLICT)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+
+  /api/v1/demands/{id}/escalate:
+    post:
+      tags: [Demands]
+      summary: v2 delta (P3, new) — raise priority with a reason. Requires demand.escalate.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/EscalateDemandRequest' }
+      responses:
+        '200':
+          description: Updated Demand
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Demand' }
+        '400':
+          description: priority did not raise above the current value (code=VALIDATION_FAILED)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+        '409':
+          description: Demand already in an immutable status (code=STATUS_CONFLICT)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+
+  /api/v1/demands/bulk/accept:
+    post:
+      tags: [Demands]
+      summary: v2 delta (P3, new) — accept many; per-item results. Requires demand.transition.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BulkDemandRequest' }
+      responses:
+        '200':
+          description: Per-item results
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BulkDemandResponse' }
+
+  /api/v1/demands/bulk/reject:
+    post:
+      tags: [Demands]
+      summary: v2 delta (P3, new) — reject many with a shared reasonCode. Requires demand.transition.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BulkDemandRequest' }
+      responses:
+        '200':
+          description: Per-item results
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BulkDemandResponse' }
+        '400':
+          description: reasonCode missing (code=VALIDATION_FAILED)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+
+  /api/v1/demands/bulk/cancel:
+    post:
+      tags: [Demands]
+      summary: v2 delta (P3, new) — cancel many; per-item results. Requires demand.transition.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BulkDemandRequest' }
+      responses:
+        '200':
+          description: Per-item results
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BulkDemandResponse' }
+
+  /api/v1/demands/metrics:
+    get:
+      tags: [Demands]
+      summary: >
+        v2 delta (P3, new) — counts by status, fulfillment mode, priority, and
+        age band. Requires demand.read.
+      responses:
+        '200':
+          description: Aggregate counts
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DemandMetrics' }
+
+  /api/v1/demands/{id}/split:
+    post:
+      tags: [Demands]
+      summary: >
+        v2 delta (P3, new) — creates N children from one parent; records
+        DemandLineage(SplitFrom). The parent is not auto-cancelled. Requires
+        demand.split.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SplitDemandRequest' }
+      responses:
+        '201':
+          description: Children created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SplitDemandResponse' }
+        '400':
+          description: No children provided (code=VALIDATION_FAILED)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+        '409':
+          description: Parent demand already in an immutable status (code=STATUS_CONFLICT)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+
+  /api/v1/demands/merge:
+    post:
+      tags: [Demands]
+      summary: >
+        v2 delta (P3, new) — each mergedId -> Cancelled + DemandLineage(MergedInto).
+        Per-item results. Requires demand.merge.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MergeDemandRequest' }
+      responses:
+        '200':
+          description: Per-item results
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MergeDemandResponse' }
+        '404':
+          description: Survivor not found (code=NOT_FOUND)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+        '409':
+          description: Survivor already in an immutable status (code=STATUS_CONFLICT)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+
+  /api/v1/demands/{id}/audit:
+    get:
+      tags: [Demands]
+      summary: v2 delta (P3, new) — unified audit trail. Requires demand.read.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: Audit entries
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DemandAuditResponse' }
+        '404':
+          description: Demand not found (code=NOT_FOUND)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+
+  /api/v1/demands/history:
+    get:
+      tags: [Demands]
+      summary: >
+        v2 delta (P5, new) — customer-scoped history by external reference; no
+        internal audit/attention detail. Requires demand.read.
+      parameters:
+        - { name: externalReferenceType, in: query, required: true, schema: { type: string } }
+        - { name: externalReferenceId, in: query, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Matching demands, newest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/CustomerDemandHistoryEntry' }
+        '400':
+          description: Missing query parameters (code=VALIDATION_FAILED)
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorEnvelope' }
@@ -632,7 +904,24 @@ components:
   schemas:
     DemandStatus:
       type: string
-      enum: [Received, Validating, Ready, Accepted, Rejected, Cancelled, Expired]
+      description: >
+        NeedsAttention (v2 delta) is non-terminal — reachable from Received (a
+        validation error) and from Accepted (a downstream resolution failure).
+      enum: [Received, Validating, Ready, Accepted, Rejected, Cancelled, Expired, NeedsAttention]
+
+    ExternalDemandStatus:
+      type: string
+      description: >
+        v2 delta (UX-17) — a derived, customer-safe projection over DemandStatus,
+        returned by GET /{id} and POST /search only. Mapping: Received/Validating
+        -> Submitted; Ready -> Received; NeedsAttention -> NeedsAttention;
+        Accepted -> Confirmed; Rejected/Cancelled/Expired -> Cancelled.
+      enum: [Submitted, Received, Confirmed, NeedsAttention, Cancelled]
+
+    DemandAttentionOwner:
+      type: string
+      description: v2 delta (UX-10) — who owns fixing a demand that needs attention.
+      enum: [Customer, Dispatcher, Administrator]
 
     DemandPriority:
       type: string
@@ -733,6 +1022,24 @@ components:
         externalReferenceType: { type: string }
         externalReferenceId: { type: string }
         version: { type: integer }
+        # v2 delta additions below
+        assignedTo: { type: string, nullable: true, description: v2 delta (UX-10) — actor id or queue name. }
+        assignedRole: { allOf: [{ $ref: '#/components/schemas/DemandAttentionOwner' }], nullable: true }
+        attentionReason: { type: string, nullable: true, description: Required whenever status = NeedsAttention. }
+        attentionIssuesJson: { type: string, nullable: true, description: "jsonb — snapshot of issues[] or the resolution failure detail." }
+        resolutionAttempts: { type: integer, description: Counted, not capped — see the v2 delta's open D-02 product decision. }
+        lastResolutionError: { type: string, nullable: true }
+        recurrenceRule: { type: string, nullable: true, description: RFC 5545 RRULE. Only meaningful when fulfillmentMode = Recurring. }
+        seriesId: { type: string, format: uuid, nullable: true }
+
+    DemandWithExternalStatus:
+      description: v2 delta — the shape GET /{id} and POST /search return (Demand + externalStatus).
+      allOf:
+        - $ref: '#/components/schemas/Demand'
+        - type: object
+          required: [externalStatus]
+          properties:
+            externalStatus: { $ref: '#/components/schemas/ExternalDemandStatus' }
 
     DemandValidationIssue:
       type: object
@@ -770,7 +1077,7 @@ components:
       properties:
         items:
           type: array
-          items: { $ref: '#/components/schemas/Demand' }
+          items: { $ref: '#/components/schemas/DemandWithExternalStatus' }
         page: { type: integer }
         pageSize: { type: integer }
         totalCount: { type: integer }
@@ -787,6 +1094,167 @@ components:
         issues:
           type: array
           items: { $ref: '#/components/schemas/DemandValidationIssue' }
+
+    # ── v2 delta schemas (docs/API/specs/update_demand-schema.sql) ────────────
+
+    FlagAttentionRequest:
+      type: object
+      required: [reason]
+      properties:
+        reason: { type: string }
+        issuesJson: { type: string, nullable: true }
+        assignedRole:
+          allOf: [{ $ref: '#/components/schemas/DemandAttentionOwner' }]
+          description: Defaults to Dispatcher if omitted.
+
+    AssignDemandRequest:
+      type: object
+      properties:
+        assignedTo: { type: string, nullable: true }
+        assignedRole: { allOf: [{ $ref: '#/components/schemas/DemandAttentionOwner' }], nullable: true }
+
+    EscalateDemandRequest:
+      type: object
+      required: [priority]
+      properties:
+        priority:
+          allOf: [{ $ref: '#/components/schemas/DemandPriority' }]
+          description: Must be strictly higher than the demand's current priority.
+        reason: { type: string, nullable: true }
+
+    BulkDemandRequest:
+      type: object
+      required: [ids]
+      properties:
+        ids:
+          type: array
+          items: { type: string, format: uuid }
+        reasonCode: { type: string, nullable: true, description: Required for bulk/reject; shared across every id in the batch. }
+        comment: { type: string, nullable: true }
+
+    BulkDemandItemResult:
+      type: object
+      required: [id, success]
+      properties:
+        id: { type: string, format: uuid }
+        success: { type: boolean }
+        error: { type: string, nullable: true }
+
+    BulkDemandResponse:
+      type: object
+      required: [results]
+      properties:
+        results:
+          type: array
+          items: { $ref: '#/components/schemas/BulkDemandItemResult' }
+
+    DemandMetrics:
+      type: object
+      required: [byStatus, byFulfillmentMode, byPriority, ageBands]
+      properties:
+        byStatus:
+          type: array
+          items:
+            type: object
+            properties: { status: { $ref: '#/components/schemas/DemandStatus' }, count: { type: integer } }
+        byFulfillmentMode:
+          type: array
+          items:
+            type: object
+            properties: { fulfillmentMode: { $ref: '#/components/schemas/DemandFulfillmentMode' }, count: { type: integer } }
+        byPriority:
+          type: array
+          items:
+            type: object
+            properties: { priority: { $ref: '#/components/schemas/DemandPriority' }, count: { type: integer } }
+        ageBands:
+          type: object
+          properties:
+            underOneHour: { type: integer }
+            oneHourToOneDay: { type: integer }
+            oneDayToOneWeek: { type: integer }
+            overOneWeek: { type: integer }
+
+    SplitChildRequest:
+      type: object
+      description: Every field is optional and inherits from the parent Demand when omitted.
+      properties:
+        summary: { type: string, nullable: true }
+        description: { type: string, nullable: true }
+        requestedStartAtUtc: { type: string, format: date-time, nullable: true }
+        requestedEndAtUtc: { type: string, format: date-time, nullable: true }
+        priority: { $ref: '#/components/schemas/DemandPriority' }
+
+    SplitDemandRequest:
+      type: object
+      required: [children]
+      properties:
+        children:
+          type: array
+          minItems: 1
+          items: { $ref: '#/components/schemas/SplitChildRequest' }
+        reason: { type: string, nullable: true }
+
+    SplitDemandResponse:
+      type: object
+      required: [parentId, children]
+      properties:
+        parentId: { type: string, format: uuid }
+        children:
+          type: array
+          items: { $ref: '#/components/schemas/Demand' }
+
+    MergeDemandRequest:
+      type: object
+      required: [survivorId, mergedIds]
+      properties:
+        survivorId: { type: string, format: uuid }
+        mergedIds:
+          type: array
+          items: { type: string, format: uuid }
+        reason: { type: string, nullable: true }
+
+    MergeDemandResponse:
+      type: object
+      required: [survivorId, results]
+      properties:
+        survivorId: { type: string, format: uuid }
+        results:
+          type: array
+          items: { $ref: '#/components/schemas/BulkDemandItemResult' }
+
+    DemandAuditEntry:
+      type: object
+      required: [changeType, occurredAt]
+      properties:
+        changeType: { type: string, description: e.g. Created, Validated, Accepted, FlaggedForAttention, Assigned, Escalated, Split, Merged. }
+        fromStatus: { allOf: [{ $ref: '#/components/schemas/DemandStatus' }], nullable: true }
+        toStatus: { allOf: [{ $ref: '#/components/schemas/DemandStatus' }], nullable: true }
+        actorId: { type: string, nullable: true }
+        actorRole: { type: string, nullable: true }
+        correlationId: { type: string, nullable: true }
+        reason: { type: string, nullable: true }
+        occurredAt: { type: string, format: date-time }
+
+    DemandAuditResponse:
+      type: object
+      required: [demandId, entries]
+      properties:
+        demandId: { type: string, format: uuid }
+        entries:
+          type: array
+          items: { $ref: '#/components/schemas/DemandAuditEntry' }
+
+    CustomerDemandHistoryEntry:
+      type: object
+      description: v2 delta (P5) — customer-safe fields only, no internal audit/attention detail.
+      required: [id, externalStatus]
+      properties:
+        id: { type: string, format: uuid }
+        externalStatus: { $ref: '#/components/schemas/ExternalDemandStatus' }
+        summary: { type: string, nullable: true }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time, nullable: true }
 
     WorkRequirementStatus:
       type: string

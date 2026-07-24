@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Text.Json;
 using Eswmp.Shared.Auth;
 using Eswmp.Shared.DTOs;
 using Eswmp.Work.Controllers;
@@ -176,5 +177,100 @@ public class DemandsApiTests(WorkApiFactory factory)
             Status: null, Priority: null, DemandType: null, FulfillmentMode: null, FromUtc: null, ToUtc: null));
         var page = await searchResponse.Content.ReadFromJsonAsync<PagedResult<Demand>>(TestJson.Options);
         page!.Items.Count(d => d.ExternalReferenceId == "ext-idempotency-race").Should().Be(1);
+    }
+
+    // ── v2 delta ────────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task FlagAttention_ThenRetryResolution_RoundTripsThroughRealPostgres()
+    {
+        var tenantId = Guid.NewGuid();
+        var client = AuthenticatedClient(tenantId,
+            EswmpPermissions.DemandCreate, EswmpPermissions.DemandRead, EswmpPermissions.DemandTransition);
+        var createResponse = await client.SendAsync(CreateDemandHttpRequest(NewRequest("ext-flag"), Guid.NewGuid().ToString()));
+        var created = await createResponse.Content.ReadFromJsonAsync<Demand>(TestJson.Options);
+
+        var flagResponse = await client.PostAsJsonAsync($"/api/v1/demands/{created!.Id}/flag-attention",
+            new { reason = "Customer requested a change" });
+        flagResponse.StatusCode.Should().Be(HttpStatusCode.OK);
+        var flagged = await flagResponse.Content.ReadFromJsonAsync<Demand>(TestJson.Options);
+        flagged!.Status.Should().Be(DemandStatus.NeedsAttention);
+        flagged.AttentionReason.Should().Be("Customer requested a change");
+
+        var retryResponse = await client.PostAsync($"/api/v1/demands/{created.Id}/retry-resolution", content: null);
+        retryResponse.StatusCode.Should().Be(HttpStatusCode.OK);
+        var retried = await retryResponse.Content.ReadFromJsonAsync<Demand>(TestJson.Options);
+        retried!.ResolutionAttempts.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task Split_CreatesChildrenWithLineage_InRealPostgres()
+    {
+        var tenantId = Guid.NewGuid();
+        var client = AuthenticatedClient(tenantId,
+            EswmpPermissions.DemandCreate, EswmpPermissions.DemandRead, EswmpPermissions.DemandSplit);
+        var createResponse = await client.SendAsync(CreateDemandHttpRequest(NewRequest("ext-split-parent"), Guid.NewGuid().ToString()));
+        var parent = await createResponse.Content.ReadFromJsonAsync<Demand>(TestJson.Options);
+
+        var splitResponse = await client.PostAsJsonAsync($"/api/v1/demands/{parent!.Id}/split", new
+        {
+            children = new[] { new { summary = "Visit 1" }, new { summary = "Visit 2" } },
+            reason = "Customer wants two separate visits",
+        });
+
+        splitResponse.StatusCode.Should().Be(HttpStatusCode.Created);
+        var body = await splitResponse.Content.ReadFromJsonAsync<JsonElement>();
+        body.GetProperty("children").GetArrayLength().Should().Be(2);
+
+        var auditResponse = await client.GetAsync($"/api/v1/demands/{parent.Id}/audit");
+        var audit = await auditResponse.Content.ReadFromJsonAsync<JsonElement>();
+        audit.GetProperty("entries").EnumerateArray().Should().Contain(e => e.GetProperty("changeType").GetString() == "Split");
+    }
+
+    [Fact]
+    public async Task Merge_CancelsMergedDemands_InRealPostgres()
+    {
+        var tenantId = Guid.NewGuid();
+        var client = AuthenticatedClient(tenantId,
+            EswmpPermissions.DemandCreate, EswmpPermissions.DemandRead, EswmpPermissions.DemandMerge);
+        var survivorResponse = await client.SendAsync(CreateDemandHttpRequest(NewRequest("ext-merge-survivor"), Guid.NewGuid().ToString()));
+        var survivor = await survivorResponse.Content.ReadFromJsonAsync<Demand>(TestJson.Options);
+        var duplicateResponse = await client.SendAsync(CreateDemandHttpRequest(NewRequest("ext-merge-duplicate"), Guid.NewGuid().ToString()));
+        var duplicate = await duplicateResponse.Content.ReadFromJsonAsync<Demand>(TestJson.Options);
+
+        var mergeResponse = await client.PostAsJsonAsync("/api/v1/demands/merge", new
+        {
+            survivorId = survivor!.Id,
+            mergedIds = new[] { duplicate!.Id },
+            reason = "Duplicate submission",
+        });
+
+        mergeResponse.StatusCode.Should().Be(HttpStatusCode.OK);
+        var mergedGetResponse = await client.GetAsync($"/api/v1/demands/{duplicate.Id}");
+        var mergedDemand = await mergedGetResponse.Content.ReadFromJsonAsync<Demand>(TestJson.Options);
+        mergedDemand!.Status.Should().Be(DemandStatus.Cancelled);
+    }
+
+    [Fact]
+    public async Task BulkAccept_MixedIds_ReturnsPerItemResults_InRealPostgres()
+    {
+        var tenantId = Guid.NewGuid();
+        var client = AuthenticatedClient(tenantId,
+            EswmpPermissions.DemandCreate, EswmpPermissions.DemandRead, EswmpPermissions.DemandTransition);
+        var createResponse = await client.SendAsync(CreateDemandHttpRequest(NewRequest("ext-bulk"), Guid.NewGuid().ToString()));
+        var created = await createResponse.Content.ReadFromJsonAsync<Demand>(TestJson.Options);
+        await client.PostAsync($"/api/v1/demands/{created!.Id}/validate", content: null);
+
+        var bulkResponse = await client.PostAsJsonAsync("/api/v1/demands/bulk/accept", new { ids = new[] { created.Id } });
+
+        // Asserted from the bulk response itself, not a follow-up GET: DemandAcceptedEvent is
+        // real once published (RabbitMQ is reachable in this harness — see WorkApiFactory), so
+        // DemandAcceptedConsumer races in asynchronously and, since "field-service-visit" has no
+        // matching Active RequirementTemplate in this fresh tenant, correctly re-flags the demand
+        // NeedsAttention shortly after — a follow-up GET would be racing against that, not testing
+        // the bulk endpoint's own (synchronous) behavior.
+        bulkResponse.StatusCode.Should().Be(HttpStatusCode.OK);
+        var body = await bulkResponse.Content.ReadFromJsonAsync<JsonElement>();
+        body.GetProperty("results")[0].GetProperty("success").GetBoolean().Should().BeTrue();
     }
 }

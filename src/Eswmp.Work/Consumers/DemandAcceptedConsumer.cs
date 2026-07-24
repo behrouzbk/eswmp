@@ -55,6 +55,10 @@ public class DemandAcceptedConsumer(
             logger.LogWarning(
                 "DemandAcceptedConsumer: no Active RequirementTemplate '{TemplateCode}' for demand {DemandId}; the demand stays unlinked until one is activated and re-resolved.",
                 templateCode, evt.DemandId);
+            // v2 delta: the failure path that didn't exist — flag rather than leave the
+            // demand silently stuck Accepted with no requirement ever created.
+            await linkService.FlagResolutionFailedAsync(
+                demand.Id, "TEMPLATE_NOT_ACTIVE", $"No Active RequirementTemplate '{templateCode}'.", evt.CorrelationId, context.CancellationToken);
             return;
         }
 
@@ -62,6 +66,8 @@ public class DemandAcceptedConsumer(
         if (definitions is null)
         {
             logger.LogWarning("DemandAcceptedConsumer: template '{TemplateCode}' version {Version} has no requirement definitions configured.", templateCode, activeVersion.Version);
+            await linkService.FlagResolutionFailedAsync(
+                demand.Id, "MISSING_DEFINITIONS", $"Template '{templateCode}' version {activeVersion.Version} has no requirement definitions configured.", evt.CorrelationId, context.CancellationToken);
             return;
         }
 
@@ -83,9 +89,11 @@ public class DemandAcceptedConsumer(
         var issues = RequirementValidationService.Evaluate(wr);
         if (issues.Any(i => i.Severity == "Error"))
         {
+            var errorDetail = string.Join("; ", issues.Where(i => i.Severity == "Error").Select(i => i.Message));
             logger.LogWarning(
                 "DemandAcceptedConsumer: resolving demand {DemandId} against template '{TemplateCode}' failed validation: {Issues}",
-                evt.DemandId, templateCode, string.Join("; ", issues.Where(i => i.Severity == "Error").Select(i => i.Message)));
+                evt.DemandId, templateCode, errorDetail);
+            await linkService.FlagResolutionFailedAsync(demand.Id, "RESOLUTION_VALIDATION_FAILED", errorDetail, evt.CorrelationId, context.CancellationToken);
             return;
         }
 

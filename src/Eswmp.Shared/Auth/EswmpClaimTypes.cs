@@ -61,6 +61,15 @@ public static class EswmpPermissions
     public const string DemandCreate = "demand.create";
     public const string DemandRead = "demand.read";
     public const string DemandTransition = "demand.transition";
+    // v2 delta — flag-attention/retry-resolution/bulk accept/reject/cancel reuse
+    // DemandTransition (same authority, just a different trigger or batched); metrics/
+    // audit/history reuse DemandRead. These four are genuinely different authorities,
+    // mirroring the Work Requirement module's precedent above of splitting authorities
+    // that are "genuinely different" rather than reusing broad ones.
+    public const string DemandAssign = "demand.assign";
+    public const string DemandEscalate = "demand.escalate";
+    public const string DemandSplit = "demand.split";
+    public const string DemandMerge = "demand.merge";
 
     // Requirement Definition (first-generation Work Requirement model — see the
     // provenance note on Eswmp.Work.Models.RequirementDefinition)

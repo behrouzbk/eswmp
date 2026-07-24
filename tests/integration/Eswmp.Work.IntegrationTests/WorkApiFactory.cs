@@ -49,6 +49,16 @@ public class WorkApiFactory : WebApplicationFactory<Program>, IAsyncLifetime
                 ["Jwt:SecretKey"] = TestJwtFactory.SecretKey,
                 ["Jwt:Issuer"] = TestJwtFactory.Issuer,
                 ["Jwt:Audience"] = TestJwtFactory.Audience,
+                // Without this, MassTransit's RabbitMQ bus tries the default localhost:5672,
+                // where nothing listens (docker-compose maps eswmp-rabbitmq to host port 6673)
+                // — every test that calls IPublishEndpoint.Publish (Accept/Reject/Cancel/Validate
+                // and the v2 delta's flag-attention/retry-resolution/assign/escalate/bulk/split/
+                // merge) then hangs for the connection's full retry/backoff window instead of
+                // failing fast or succeeding. Unlike Jwt:SecretKey above, MassTransit's actual
+                // RabbitMQ connection is built lazily (when the bus is resolved at startup, not
+                // at AddMassTransit() registration time in Program.cs), so it does see this
+                // ConfigureAppConfiguration override.
+                ["MessageBus:Port"] = "6673",
             });
         });
     }

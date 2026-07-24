@@ -721,3 +721,156 @@ rate limits, and the idempotency and outbox mechanics. Section 11 lists
 what to confirm against work.v1.yaml and a UAT capture before
 implementation, since response wire format cannot be derived from static
 artifacts.*
+
+**12. v2 Delta (2026-07-24) --- NeedsAttention lifecycle, triage/ownership, recurrence, lineage, audit**
+
+*Source: docs/API/specs/update_demand-schema.sql,
+docs/API/specs/v2-delta-summary.docx §2. Closes the highest-priority gap
+the UX review found: a failed resolution was silent --- the demand read
+Accepted while no WorkRequirement was ever created, and the customer had
+already been told their request was received.*
+
+**12.1 Data model**
+
+  -----------------------------------------------------------------------
+  **Change**                       **Detail**
+  --------------------------------- -------------------------------------
+  demand_status --- NeedsAttention  Appended last (ordinal 7 in the
+                                    as-built int-column enum, never
+                                    inserted mid-list --- see §12.6).
+                                    Non-terminal; entered from Received
+                                    (validation error) and from Accepted
+                                    (resolution failure).
+
+  attention_owner (new)            Customer \| Dispatcher \|
+                                    Administrator.
+
+  AssignedTo / AssignedRole (new)  Triage ownership.
+
+  AttentionReason /                Why; a snapshot of issues\[\] or the
+  AttentionIssuesJson (new)        resolution failure detail.
+
+  ResolutionAttempts /             Counted, not capped --- see the open
+  LastResolutionError (new)        D-02 product decision.
+
+  RecurrenceRule / SeriesId (new)  RFC 5545 RRULE + series identity.
+
+  DemandLineage (new table)        Split/merge provenance --- SplitFrom /
+                                    MergedInto edges.
+
+  DemandAuditEntries (new table)   Real audit trail; GET /{id}/history no
+                                    longer always returns \[\].
+  -----------------------------------------------------------------------
+
+**12.2 New and revised endpoints**
+
+  -----------------------------------------------------------------------------
+  **Method / path**                          **Change**            **Detail**
+  ------------------------------------------- --------------------- -----------
+  POST /demands/{id}/flag-attention           New (P1)              Requires demand.transition.
+
+  POST /demands/{id}/retry-resolution         New (P1)              Re-emits DemandAcceptedEvent. Requires demand.transition.
+
+  GET /demands/{id}, POST /demands/search     Revised               Both now return externalStatus (§12.3).
+
+  GET /demands/{id}/history                   Revised               Was always \[\]; now the real DemandAuditEntries trail.
+
+  POST /demands/{id}/assign                   New (P3)              Requires the new demand.assign.
+
+  POST /demands/{id}/escalate                 New (P3)              Must raise priority. Requires the new demand.escalate.
+
+  POST /demands/bulk/accept, bulk/reject,     New (P3)              Per-item results; one failure doesn't abort the batch.
+  bulk/cancel                                                       Requires demand.transition.
+
+  GET /demands/metrics                        New (P3)              Counts by status, mode, priority, age band.
+
+  POST /demands/{id}/split                    New (P3)              Requires the new demand.split. Parent is not
+                                                                     auto-cancelled.
+
+  POST /demands/merge                         New (P3)              Requires the new demand.merge.
+
+  GET /demands/{id}/audit                     New (P3)              Same shape as the revised {id}/history.
+
+  GET /demands/history                        New (P5)              Customer-scoped by externalReferenceType/Id;
+                                                                     customer-safe fields only, no internal detail.
+  -----------------------------------------------------------------------------
+
+**12.3 externalStatus**
+
+A derived, customer-safe projection over the 8-value internal
+demand_status (UX-17: the internal enum must not leak to customer
+surfaces). The reviewed UX doc's own example states only NeedsAttention
+-\> NeedsAttention; the rest of this mapping is an inferred, documented
+choice made when implementing this contract:
+
+  -----------------------------------------------------------------------
+  **Internal status**              **externalStatus**
+  --------------------------------- -------------------------------------
+  Received, Validating             Submitted
+
+  Ready                             Received
+
+  NeedsAttention                    NeedsAttention
+
+  Accepted                          Confirmed
+
+  Rejected, Cancelled, Expired       Cancelled
+  -----------------------------------------------------------------------
+
+**12.4 Permissions**
+
+Only demand.create/demand.read/demand.transition existed before this
+delta. flag-attention, retry-resolution, and all three bulk/\* actions
+reuse demand.transition (same authority, just a different trigger or
+batched); metrics, {id}/audit, and the new history reuse demand.read.
+Four genuinely different authorities got new permissions, matching the
+Work Requirement module's precedent of splitting authorities that are
+"genuinely different" rather than reusing broad ones: **demand.assign**,
+**demand.escalate**, **demand.split**, **demand.merge**.
+
+**12.5 Split and merge semantics**
+
+Split: children are fresh Demand rows (new id, Status = Received)
+cloning every parent field not overridden by the request, each getting a
+DemandLineage row (Relation = SplitFrom). The parent is deliberately
+**not** auto-cancelled --- no product decision says it should be; a
+dispatcher cancels it separately if desired. Merge: each mergedId -\>
+Cancelled (reuses the existing terminal state) plus a
+DemandLineage(MergedInto) row; rejects a mergedId that's the survivor
+itself or already terminal.
+
+**12.6 Enum-ordinal safety**
+
+The as-built demand_status is a plain integer column (EF's default
+enum-to-int convention, confirmed against WorkDbContext.cs), not the
+native Postgres enum this update's DDL literally declares.
+**NeedsAttention had to be appended last (ordinal 7)**, not inserted at
+its spec-narrative position (4th, between Ready and Accepted) ---
+inserting it mid-list would have silently reshuffled the stored ordinals
+of every status after it in the live database, corrupting every existing
+row's meaning. The same class of issue this codebase already fixed once
+for DemandFulfillmentMode's ordinal-0 sentinel.
+
+**12.7 Resolution-failure wiring**
+
+DemandAcceptedConsumer's four early-return branches (demand not found,
+no Active template, no definitions, validation failed) previously only
+logged a warning. Three of the four (all but "demand not found", which
+has no demand to flag) now call
+DemandRequirementLinkService.FlagResolutionFailedAsync --- the
+Demand-module-owned service the consumer already called for the success
+path (CLAUDE.md rule 11) --- which sets NeedsAttention, increments
+ResolutionAttempts, and publishes DemandNeedsAttentionEvent. A successful
+retry-resolution call clears NeedsAttention via the same
+LinkRequirementAsync method the success path always used, once
+resolution actually succeeds.
+
+*Established by this delta: the 8 data-model items and 12 endpoint
+changes above, each traced to a specific reviewed UX capability
+(UX-09/UX-10/UX-14/UX-17) or an explicitly open product decision (D-02).
+New events (DemandNeedsAttentionEvent, DemandAssignedEvent,
+DemandEscalatedEvent, DemandSplitEvent, DemandMergedEvent) publish the
+same way Demand's three existing events already do --- a direct
+IPublishEndpoint.Publish after SaveChangesAsync, not the Work Requirement
+module's transactional outbox, per an explicit scope decision to match
+the existing pattern rather than introduce new infrastructure.*
