@@ -437,3 +437,57 @@ types and lengths, foreign keys and delete rules, indexes, CHECK
 constraints, the outbox and idempotency tables, and the four alignment
 decisions in §7. The "Service Request" question in §7.1 is unresolved in
 the source material and is flagged for workshop decision.*
+
+# **9. v2 Delta (2026-07-23)**
+
+*Source: docs/API/specs/update_requirement-schema.sql,
+docs/API/specs/v2-delta-summary.docx §3. Two genuinely new schema
+pieces; requirement.IdempotencyRecords / OutboxMessages (§4.7) already
+matched this update and needed no change.*
+
+## **9.1 RequirementTemplateVersions.RowVersion**
+
+A bigint counter, default 1, added to the table in §4.2. Concurrency
+guard (UX-08) so two authors editing the same Draft version cannot
+silently overwrite each other --- checked against the PUT
+.../requirements request\'s If-Match header, incremented on every
+successful write (api §13.1).
+
+## **9.2 requirement.RequirementLineVisibility**
+
+  -----------------------------------------------------------------------
+  **Column**         **Type**       **Notes**
+  ------------------ -------------- -----------------------------------
+  WorkRequirementId  uuid           FK → WorkRequirements, cascade
+
+  LineType           varchar        The owning table\'s entity name,
+                                    e.g. CapabilityRequirement
+
+  LineId             uuid           The row in that table. No FK --- a
+                                    loosely-coupled discriminator, the
+                                    same pattern as SourceType/SourceId
+                                    (§4.1), since one table cannot carry
+                                    a single FK to thirteen disparate
+                                    line tables
+
+  VisibilityLevel    enum, def.     Customer \| Provider \| Internal
+                     Internal       
+
+  CustomerVisible    bool, def.     Derived: true only when
+                     false          VisibilityLevel = Customer. CHECK
+                                    enforces the two cannot drift apart
+  -----------------------------------------------------------------------
+
+UQ (LineType, LineId); index (TenantId, WorkRequirementId,
+VisibilityLevel). One keyed table rather than a VisibilityLevel column
+repeated across every requirement-line table above (§4.3--4.6): explain,
+resolved, and compare all assemble their output from many of those
+tables, and a single lookup keeps the disclosure filter in one place
+(UX-03, UX-04). Populated at resolve/revise time as each line entity is
+materialized (api §13.2), and consulted by the audience-filtered reads
+in api §13.3.
+
+*Established by this delta: the schema-level RowVersion column and the
+RequirementLineVisibility table, both traced to specific UX review
+questions (UX-08, UX-03/UX-04). See api §13 for the corresponding
+endpoint changes.*

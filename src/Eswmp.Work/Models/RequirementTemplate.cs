@@ -48,4 +48,9 @@ public class RequirementTemplateVersion : TenantScopedEntity
 
     /// <summary>jsonb — the requirement definitions this version resolves to. Immutable after activation.</summary>
     public string DefinitionJson { get; set; } = "{}";
+
+    /// <summary>Concurrency guard (v2 delta, UX-08) so two authors editing the same draft
+    /// version cannot silently overwrite each other. Compared against the PUT
+    /// .../requirements request's If-Match header; incremented on every successful write.</summary>
+    public long RowVersion { get; set; } = 1;
 }

@@ -54,7 +54,7 @@ public class WorkRequirementsApiTests(WorkApiFactory factory)
         locationRequirement = new { locationMode = "CustomerLocation" },
     };
 
-    private async Task<(Guid TemplateId, string Code)> CreateAndActivateTemplate(HttpClient client, string code)
+    private async Task<(Guid TemplateId, string Code)> CreateAndActivateTemplate(HttpClient client, string code, object? definitions = null)
     {
         var createResponse = await client.SendAsync(PostWithIdempotencyKey(
             "/api/v1/work-requirement-templates",
@@ -64,8 +64,14 @@ public class WorkRequirementsApiTests(WorkApiFactory factory)
         var created = await createResponse.Content.ReadFromJsonAsync<JsonElement>();
         var templateId = created.GetProperty("id").GetGuid();
 
-        var configureResponse = await client.PutAsJsonAsync(
-            $"/api/v1/work-requirement-templates/{templateId}/versions/1/requirements", ValidDefinitions());
+        var configureRequest = new HttpRequestMessage(HttpMethod.Put, $"/api/v1/work-requirement-templates/{templateId}/versions/1/requirements")
+        {
+            Content = JsonContent.Create(definitions ?? ValidDefinitions()),
+        };
+        // TryAddWithoutValidation: HttpHeaders.Add enforces RFC 7232 ETag quoting for If-Match
+        // and rejects a bare "1"; the server accepts both forms (see ConfigureRequirements).
+        configureRequest.Headers.TryAddWithoutValidation("If-Match", "1");
+        var configureResponse = await client.SendAsync(configureRequest);
         configureResponse.StatusCode.Should().Be(HttpStatusCode.OK);
 
         var activateResponse = await client.PostAsync($"/api/v1/work-requirement-templates/{templateId}/versions/1/activate", null);
@@ -161,5 +167,63 @@ public class WorkRequirementsApiTests(WorkApiFactory factory)
 
         first.StatusCode.Should().Be(HttpStatusCode.OK);
         second.StatusCode.Should().Be(HttpStatusCode.Conflict);
+    }
+
+    // v2 delta (UX-08): If-Match concurrency on template configure-requirements.
+    [Fact]
+    public async Task ConfigureRequirements_StaleIfMatch_ReturnsPreconditionFailed()
+    {
+        var tenantId = Guid.NewGuid();
+        var client = AuthenticatedClient(tenantId, EswmpPermissions.WorkRequirementTemplateCreate, EswmpPermissions.WorkRequirementTemplateUpdate);
+
+        var createResponse = await client.SendAsync(PostWithIdempotencyKey(
+            "/api/v1/work-requirement-templates",
+            new { code = "STALE_IF_MATCH", name = "Stale If-Match", workType = "DOG_WALKING" },
+            Guid.NewGuid().ToString()));
+        var created = await createResponse.Content.ReadFromJsonAsync<JsonElement>();
+        var templateId = created.GetProperty("id").GetGuid();
+
+        var staleRequest = new HttpRequestMessage(HttpMethod.Put, $"/api/v1/work-requirement-templates/{templateId}/versions/1/requirements")
+        {
+            Content = JsonContent.Create(ValidDefinitions()),
+        };
+        staleRequest.Headers.TryAddWithoutValidation("If-Match", "999");
+
+        var response = await client.SendAsync(staleRequest);
+
+        response.StatusCode.Should().Be(HttpStatusCode.PreconditionFailed);
+    }
+
+    // v2 delta (UX-03/UX-04): per-line visibility persists on resolve and filters
+    // GET .../resolved by audience end-to-end against real Postgres.
+    [Fact]
+    public async Task GetResolved_AudienceCustomer_HidesInternalLines()
+    {
+        var tenantId = Guid.NewGuid();
+        var client = AuthenticatedClient(tenantId, AllTemplatePermissions);
+        var definitions = new
+        {
+            resourceRequirements = new[] { new { roleCode = "DOG_WALKER", resourceCategory = "Person", minimumQuantity = 1, maximumQuantity = 1, visibilityLevel = "Customer" } },
+            durationRequirement = new { durationType = "Fixed", estimatedDurationMinutes = 60 },
+            capabilityRequirements = new[] { new { roleCode = "DOG_WALKER", capabilityCode = "DOG_WALKING", mandatory = true, visibilityLevel = "Internal" } },
+            capacityRequirements = new[] { new { roleCode = "DOG_WALKER", dimensionCode = "PET_COUNT", quantity = 1, unit = "COUNT", visibilityLevel = "Customer" } },
+        };
+        await CreateAndActivateTemplate(client, "VISIBILITY_TEST", definitions);
+
+        var resolveResponse = await client.SendAsync(PostWithIdempotencyKey(
+            "/api/v1/work-requirements/resolve",
+            new { sourceType = "Demand", sourceId = "demand-visibility", templateCode = "VISIBILITY_TEST" },
+            Guid.NewGuid().ToString()));
+        resolveResponse.StatusCode.Should().Be(HttpStatusCode.Created);
+        var resolved = await resolveResponse.Content.ReadFromJsonAsync<JsonElement>();
+        var workRequirementId = resolved.GetProperty("workRequirementId").GetGuid();
+
+        var dispatcherView = await client.GetFromJsonAsync<JsonElement>($"/api/v1/work-requirements/{workRequirementId}/resolved");
+        dispatcherView.GetProperty("capabilityRequirements").GetArrayLength().Should().Be(1);
+
+        var customerView = await client.GetFromJsonAsync<JsonElement>($"/api/v1/work-requirements/{workRequirementId}/resolved?audience=customer");
+        customerView.GetProperty("resourceRequirements").GetArrayLength().Should().Be(1);
+        customerView.GetProperty("capacityRequirements").GetArrayLength().Should().Be(1);
+        customerView.GetProperty("capabilityRequirements").GetArrayLength().Should().Be(0);
     }
 }

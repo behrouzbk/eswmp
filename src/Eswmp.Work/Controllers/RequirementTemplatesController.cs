@@ -207,13 +207,31 @@ public class RequirementTemplatesController(
 
     [HttpPut("{templateId:guid}/versions/{version:int}/requirements")]
     [RequirePermission(EswmpPermissions.WorkRequirementTemplateUpdate)]
-    public async Task<IActionResult> ConfigureRequirements(Guid templateId, int version, [FromBody] JsonElement body)
+    public async Task<IActionResult> ConfigureRequirements(
+        Guid templateId,
+        int version,
+        [FromBody] JsonElement body,
+        [FromHeader(Name = "If-Match")] string? ifMatch)
     {
+        // v2 delta (UX-08): two authors editing the same draft version must not silently
+        // overwrite each other — If-Match against RowVersion is required, not optional.
+        // Accept both a bare value ("1") and a properly RFC 7232-quoted ETag ("\"1\"") —
+        // real HTTP clients send the latter.
+        if (string.IsNullOrWhiteSpace(ifMatch) || !long.TryParse(ifMatch.Trim('"'), out var expectedRowVersion))
+        {
+            return this.ValidationFailed("The If-Match header is required and must be the version's current RowVersion.");
+        }
+
         var templateVersion = await db.RequirementTemplateVersions
             .FirstOrDefaultAsync(v => v.TemplateId == templateId && v.Version == version);
         if (templateVersion is null)
         {
             return this.NotFoundError($"No version {version} was found for template '{templateId}'.");
+        }
+
+        if (expectedRowVersion != templateVersion.RowVersion)
+        {
+            return this.VersionConflict(expectedRowVersion, templateVersion.RowVersion);
         }
 
         if (templateVersion.Status != TemplateVersionStatus.Draft)
@@ -252,6 +270,7 @@ public class RequirementTemplatesController(
         }
 
         templateVersion.DefinitionJson = bodyJson;
+        templateVersion.RowVersion++;
         await db.SaveChangesAsync();
 
         return Ok(templateVersion);

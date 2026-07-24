@@ -70,6 +70,25 @@ public static class RequirementResolutionService
     /// </summary>
     public static DateTimeOffset? ToUtc(DateTimeOffset? value) => value?.ToUniversalTime();
 
+    /// <summary>
+    /// Builds a RequirementLineVisibility row for one requirement line (v2 delta, UX-03/UX-04).
+    /// An unset level defaults to Internal — the safe choice, since "no explicit disclosure
+    /// grant" should mean "don't disclose" rather than the reverse.
+    /// </summary>
+    public static RequirementLineVisibility BuildVisibility(Guid tenantId, Guid workRequirementId, string lineType, Guid lineId, VisibilityLevel? level)
+    {
+        var resolved = level ?? VisibilityLevel.Internal;
+        return new RequirementLineVisibility
+        {
+            TenantId = tenantId,
+            WorkRequirementId = workRequirementId,
+            LineType = lineType,
+            LineId = lineId,
+            VisibilityLevel = resolved,
+            CustomerVisible = resolved == VisibilityLevel.Customer,
+        };
+    }
+
     /// <summary>Builds the child entity graph on <paramref name="wr"/> from a template's frozen definitions.</summary>
     public static void ApplyDefinitions(WorkRequirement wr, RequirementSetDto defs, Guid tenantId)
     {
@@ -92,6 +111,7 @@ public static class RequirementResolutionService
             };
             wr.ResourceRequirements.Add(role);
             roleByCode[r.RoleCode] = role;
+            wr.LineVisibilities.Add(BuildVisibility(tenantId, wr.Id, nameof(ResourceRoleRequirement), role.Id, r.VisibilityLevel));
         }
 
         Guid? RoleId(string? roleCode) =>
@@ -99,7 +119,7 @@ public static class RequirementResolutionService
 
         foreach (var c in defs.CapabilityRequirements ?? [])
         {
-            wr.CapabilityRequirements.Add(new CapabilityRequirement
+            var entity = new CapabilityRequirement
             {
                 TenantId = tenantId,
                 WorkRequirementId = wr.Id,
@@ -109,12 +129,14 @@ public static class RequirementResolutionService
                 MinimumExperience = c.MinimumExperience,
                 Mandatory = c.Mandatory,
                 Scope = c.Scope,
-            });
+            };
+            wr.CapabilityRequirements.Add(entity);
+            wr.LineVisibilities.Add(BuildVisibility(tenantId, wr.Id, nameof(CapabilityRequirement), entity.Id, c.VisibilityLevel));
         }
 
         foreach (var c in defs.CertificationRequirements ?? [])
         {
-            wr.CertificationRequirements.Add(new CertificationRequirement
+            var entity = new CertificationRequirement
             {
                 TenantId = tenantId,
                 WorkRequirementId = wr.Id,
@@ -123,12 +145,14 @@ public static class RequirementResolutionService
                 Mandatory = c.Mandatory,
                 MustBeValidThrough = ToUtc(c.MustBeValidThrough),
                 VerificationLevel = c.VerificationLevel,
-            });
+            };
+            wr.CertificationRequirements.Add(entity);
+            wr.LineVisibilities.Add(BuildVisibility(tenantId, wr.Id, nameof(CertificationRequirement), entity.Id, c.VisibilityLevel));
         }
 
         foreach (var c in defs.CapacityRequirements ?? [])
         {
-            wr.CapacityRequirements.Add(new CapacityRequirement
+            var entity = new CapacityRequirement
             {
                 TenantId = tenantId,
                 WorkRequirementId = wr.Id,
@@ -138,7 +162,9 @@ public static class RequirementResolutionService
                 Unit = c.Unit,
                 AggregationScope = c.AggregationScope,
                 Mandatory = c.Mandatory,
-            });
+            };
+            wr.CapacityRequirements.Add(entity);
+            wr.LineVisibilities.Add(BuildVisibility(tenantId, wr.Id, nameof(CapacityRequirement), entity.Id, c.VisibilityLevel));
         }
 
         if (defs.DurationRequirement is { } d)
@@ -154,6 +180,7 @@ public static class RequirementResolutionService
                 SetupDurationMinutes = d.SetupDurationMinutes,
                 CleanupDurationMinutes = d.CleanupDurationMinutes,
             };
+            wr.LineVisibilities.Add(BuildVisibility(tenantId, wr.Id, nameof(DurationRequirement), wr.DurationRequirement.Id, d.VisibilityLevel));
         }
 
         if (defs.TimeRequirement is { } t)
@@ -172,6 +199,7 @@ public static class RequirementResolutionService
                 Deadline = ToUtc(t.Deadline),
                 Timezone = t.Timezone,
             };
+            wr.LineVisibilities.Add(BuildVisibility(tenantId, wr.Id, nameof(TimeRequirement), wr.TimeRequirement.Id, t.VisibilityLevel));
         }
 
         if (defs.LocationRequirement is { } loc)
@@ -188,6 +216,7 @@ public static class RequirementResolutionService
                 ServiceRadius = loc.ServiceRadius,
                 LocationFlexibility = loc.LocationFlexibility,
             };
+            wr.LineVisibilities.Add(BuildVisibility(tenantId, wr.Id, nameof(LocationRequirement), wr.LocationRequirement.Id, loc.VisibilityLevel));
         }
 
         if (defs.ExecutionRequirement is { } exec)
@@ -198,6 +227,7 @@ public static class RequirementResolutionService
                 WorkRequirementId = wr.Id,
                 ExecutionMode = exec.ExecutionMode,
             };
+            wr.LineVisibilities.Add(BuildVisibility(tenantId, wr.Id, nameof(ExecutionRequirement), wr.ExecutionRequirement.Id, exec.VisibilityLevel));
         }
 
         if (defs.TravelRequirement is { } travel)
@@ -213,11 +243,12 @@ public static class RequirementResolutionService
                 MaximumTravelDistance = travel.MaximumTravelDistance,
                 TravelTimeIncludedInWork = travel.TravelTimeIncludedInWork,
             };
+            wr.LineVisibilities.Add(BuildVisibility(tenantId, wr.Id, nameof(TravelRequirement), wr.TravelRequirement.Id, travel.VisibilityLevel));
         }
 
         foreach (var b in defs.BufferRequirements ?? [])
         {
-            wr.BufferRequirements.Add(new BufferRequirement
+            var entity = new BufferRequirement
             {
                 TenantId = tenantId,
                 WorkRequirementId = wr.Id,
@@ -225,12 +256,14 @@ public static class RequirementResolutionService
                 DurationMinutes = b.DurationMinutes,
                 AppliesToRole = b.AppliesToRole,
                 HardConstraint = b.HardConstraint,
-            });
+            };
+            wr.BufferRequirements.Add(entity);
+            wr.LineVisibilities.Add(BuildVisibility(tenantId, wr.Id, nameof(BufferRequirement), entity.Id, b.VisibilityLevel));
         }
 
         foreach (var dep in defs.DependencyRequirements ?? [])
         {
-            wr.DependencyRequirements.Add(new DependencyRequirement
+            var entity = new DependencyRequirement
             {
                 TenantId = tenantId,
                 WorkRequirementId = wr.Id,
@@ -239,12 +272,14 @@ public static class RequirementResolutionService
                 DependsOnReferenceId = dep.DependsOnReferenceId,
                 LagMinutes = dep.LagMinutes,
                 HardConstraint = dep.HardConstraint,
-            });
+            };
+            wr.DependencyRequirements.Add(entity);
+            wr.LineVisibilities.Add(BuildVisibility(tenantId, wr.Id, nameof(DependencyRequirement), entity.Id, dep.VisibilityLevel));
         }
 
         foreach (var con in defs.Constraints ?? [])
         {
-            wr.Constraints.Add(new RequirementConstraint
+            var entity = new RequirementConstraint
             {
                 TenantId = tenantId,
                 WorkRequirementId = wr.Id,
@@ -254,12 +289,14 @@ public static class RequirementResolutionService
                 Value = con.Value,
                 HardConstraint = con.HardConstraint,
                 Reason = con.Reason,
-            });
+            };
+            wr.Constraints.Add(entity);
+            wr.LineVisibilities.Add(BuildVisibility(tenantId, wr.Id, nameof(RequirementConstraint), entity.Id, con.VisibilityLevel));
         }
 
         foreach (var pref in defs.Preferences ?? [])
         {
-            wr.Preferences.Add(new RequirementPreference
+            var entity = new RequirementPreference
             {
                 TenantId = tenantId,
                 WorkRequirementId = wr.Id,
@@ -267,7 +304,9 @@ public static class RequirementResolutionService
                 Value = pref.Value,
                 Weight = pref.Weight,
                 Source = pref.Source,
-            });
+            };
+            wr.Preferences.Add(entity);
+            wr.LineVisibilities.Add(BuildVisibility(tenantId, wr.Id, nameof(RequirementPreference), entity.Id, pref.VisibilityLevel));
         }
     }
 
@@ -349,6 +388,12 @@ public static class RequirementResolutionService
         }
     }
 
+    /// <summary>Looks up each requirement line's VisibilityLevel by (LineType, LineId) — shared
+    /// by ToRequirementSet and Explain (which reads wr.*Requirements directly rather than via
+    /// RequirementSetDto).</summary>
+    public static Dictionary<(string LineType, Guid LineId), VisibilityLevel> BuildVisibilityLookup(WorkRequirement wr) =>
+        wr.LineVisibilities.ToDictionary(v => (v.LineType, v.LineId), v => v.VisibilityLevel);
+
     /// <summary>The reverse of ApplyDefinitions — reads a loaded WorkRequirement graph back out
     /// as the wire-shape ResolvedRequirements contract for GET .../resolved.</summary>
     public static RequirementSetDto ToRequirementSet(WorkRequirement wr)
@@ -356,37 +401,102 @@ public static class RequirementResolutionService
         var roleCodeById = wr.ResourceRequirements.ToDictionary(r => r.Id, r => r.RoleCode);
         string? RoleCode(Guid? roleId) => roleId is { } id && roleCodeById.TryGetValue(id, out var code) ? code : null;
 
+        var visibilityByLine = BuildVisibilityLookup(wr);
+        VisibilityLevel? Visibility(string lineType, Guid lineId) =>
+            visibilityByLine.TryGetValue((lineType, lineId), out var level) ? level : null;
+
         return new RequirementSetDto(
             ResourceRequirements:
             [.. wr.ResourceRequirements.Select(r => new ResourceRoleRequirementDto(
-                r.RoleCode, r.ResourceCategory, r.MinimumQuantity, r.MaximumQuantity, r.Required, r.SelectionMode, r.SameResourceRequired, r.Sequence))],
+                r.RoleCode, r.ResourceCategory, r.MinimumQuantity, r.MaximumQuantity, r.Required, r.SelectionMode, r.SameResourceRequired, r.Sequence,
+                r.Id, Visibility(nameof(ResourceRoleRequirement), r.Id)))],
             DurationRequirement: wr.DurationRequirement is { } d
-                ? new DurationRequirementDto(d.DurationType, d.EstimatedDurationMinutes, d.MinimumDurationMinutes, d.MaximumDurationMinutes, d.SetupDurationMinutes, d.CleanupDurationMinutes)
+                ? new DurationRequirementDto(d.DurationType, d.EstimatedDurationMinutes, d.MinimumDurationMinutes, d.MaximumDurationMinutes, d.SetupDurationMinutes, d.CleanupDurationMinutes,
+                    d.Id, Visibility(nameof(DurationRequirement), d.Id))
                 : throw new InvalidOperationException("A resolved WorkRequirement must always carry a DurationRequirement."),
             CapabilityRequirements: wr.CapabilityRequirements.Count == 0 ? null :
-                [.. wr.CapabilityRequirements.Select(c => new CapabilityRequirementDto(c.CapabilityCode, RoleCode(c.ResourceRoleRequirementId), c.Level, c.MinimumExperience, c.Mandatory, c.Scope))],
+                [.. wr.CapabilityRequirements.Select(c => new CapabilityRequirementDto(c.CapabilityCode, RoleCode(c.ResourceRoleRequirementId), c.Level, c.MinimumExperience, c.Mandatory, c.Scope,
+                    c.Id, Visibility(nameof(CapabilityRequirement), c.Id)))],
             CertificationRequirements: wr.CertificationRequirements.Count == 0 ? null :
-                [.. wr.CertificationRequirements.Select(c => new CertificationRequirementDto(c.CertificationTypeCode, RoleCode(c.ResourceRoleRequirementId), c.Mandatory, c.MustBeValidThrough, c.VerificationLevel))],
+                [.. wr.CertificationRequirements.Select(c => new CertificationRequirementDto(c.CertificationTypeCode, RoleCode(c.ResourceRoleRequirementId), c.Mandatory, c.MustBeValidThrough, c.VerificationLevel,
+                    c.Id, Visibility(nameof(CertificationRequirement), c.Id)))],
             CapacityRequirements: wr.CapacityRequirements.Count == 0 ? null :
-                [.. wr.CapacityRequirements.Select(c => new CapacityRequirementDto(c.DimensionCode, c.Quantity, RoleCode(c.ResourceRoleRequirementId), c.Unit, c.AggregationScope, c.Mandatory))],
+                [.. wr.CapacityRequirements.Select(c => new CapacityRequirementDto(c.DimensionCode, c.Quantity, RoleCode(c.ResourceRoleRequirementId), c.Unit, c.AggregationScope, c.Mandatory,
+                    c.Id, Visibility(nameof(CapacityRequirement), c.Id)))],
             TimeRequirement: wr.TimeRequirement is { } t
-                ? new TimeRequirementDto(t.TimeConstraintType, t.EarliestStart, t.LatestStart, t.EarliestFinish, t.LatestFinish, t.FixedStart, t.FixedEnd, t.Deadline, t.Timezone)
+                ? new TimeRequirementDto(t.TimeConstraintType, t.EarliestStart, t.LatestStart, t.EarliestFinish, t.LatestFinish, t.FixedStart, t.FixedEnd, t.Deadline, t.Timezone,
+                    t.Id, Visibility(nameof(TimeRequirement), t.Id))
                 : null,
             LocationRequirement: wr.LocationRequirement is { } loc
-                ? new LocationRequirementDto(loc.LocationMode, loc.LocationReferenceType, loc.LocationReferenceId, loc.Latitude, loc.Longitude, loc.ServiceRadius, loc.LocationFlexibility)
+                ? new LocationRequirementDto(loc.LocationMode, loc.LocationReferenceType, loc.LocationReferenceId, loc.Latitude, loc.Longitude, loc.ServiceRadius, loc.LocationFlexibility,
+                    loc.Id, Visibility(nameof(LocationRequirement), loc.Id))
                 : null,
-            ExecutionRequirement: wr.ExecutionRequirement is { } exec ? new ExecutionRequirementDto(exec.ExecutionMode) : null,
+            ExecutionRequirement: wr.ExecutionRequirement is { } exec
+                ? new ExecutionRequirementDto(exec.ExecutionMode, exec.Id, Visibility(nameof(ExecutionRequirement), exec.Id))
+                : null,
             TravelRequirement: wr.TravelRequirement is { } travel
-                ? new TravelRequirementDto(travel.TravelRequired, travel.OriginMode, travel.DestinationMode, travel.MaximumTravelTimeMinutes, travel.MaximumTravelDistance, travel.TravelTimeIncludedInWork)
+                ? new TravelRequirementDto(travel.TravelRequired, travel.OriginMode, travel.DestinationMode, travel.MaximumTravelTimeMinutes, travel.MaximumTravelDistance, travel.TravelTimeIncludedInWork,
+                    travel.Id, Visibility(nameof(TravelRequirement), travel.Id))
                 : null,
             BufferRequirements: wr.BufferRequirements.Count == 0 ? null :
-                [.. wr.BufferRequirements.Select(b => new BufferRequirementDto(b.BufferType, b.DurationMinutes, b.AppliesToRole, b.HardConstraint))],
+                [.. wr.BufferRequirements.Select(b => new BufferRequirementDto(b.BufferType, b.DurationMinutes, b.AppliesToRole, b.HardConstraint,
+                    b.Id, Visibility(nameof(BufferRequirement), b.Id)))],
             DependencyRequirements: wr.DependencyRequirements.Count == 0 ? null :
-                [.. wr.DependencyRequirements.Select(d => new DependencyRequirementDto(d.DependencyType, d.DependsOnReferenceType, d.DependsOnReferenceId, d.LagMinutes, d.HardConstraint))],
+                [.. wr.DependencyRequirements.Select(d => new DependencyRequirementDto(d.DependencyType, d.DependsOnReferenceType, d.DependsOnReferenceId, d.LagMinutes, d.HardConstraint,
+                    d.Id, Visibility(nameof(DependencyRequirement), d.Id)))],
             Constraints: wr.Constraints.Count == 0 ? null :
-                [.. wr.Constraints.Select(c => new ConstraintDto(c.ConstraintType, c.Scope, c.Operator, c.Value, c.HardConstraint, c.Reason))],
+                [.. wr.Constraints.Select(c => new ConstraintDto(c.ConstraintType, c.Scope, c.Operator, c.Value, c.HardConstraint, c.Reason,
+                    c.Id, Visibility(nameof(RequirementConstraint), c.Id)))],
             Preferences: wr.Preferences.Count == 0 ? null :
-                [.. wr.Preferences.Select(p => new PreferenceDto(p.PreferenceType, p.Value, p.Weight, p.Source))]);
+                [.. wr.Preferences.Select(p => new PreferenceDto(p.PreferenceType, p.Value, p.Weight, p.Source,
+                    p.Id, Visibility(nameof(RequirementPreference), p.Id)))]);
+    }
+
+    /// <summary>
+    /// Maps the ?audience= query param (v2 delta, UX-03/UX-04) to the set of VisibilityLevels
+    /// that audience may see. Null/unrecognized/"dispatcher" means unfiltered (today's
+    /// behavior) — internal callers see everything by default.
+    /// </summary>
+    public static VisibilityLevel[]? ParseAudience(string? audience) => audience?.Trim().ToLowerInvariant() switch
+    {
+        null or "" or "dispatcher" or "internal" => null,
+        "customer" => [VisibilityLevel.Customer],
+        "provider" => [VisibilityLevel.Customer, VisibilityLevel.Provider],
+        _ => throw new ArgumentException($"Unrecognized audience '{audience}'. Expected customer, provider, or dispatcher."),
+    };
+
+    /// <summary>
+    /// Restricts a resolved requirement set to the lines a given audience may see (v2 delta,
+    /// UX-03/UX-04: "a customer surface that receives the full requirement and hides fields in
+    /// the browser has still transmitted internal operational data" — filtering happens here,
+    /// server-side, before serialization). A null <paramref name="allowed"/> is a no-op (used
+    /// when audience is omitted/dispatcher). DurationRequirement is exempt — it's structurally
+    /// required on every resolved WorkRequirement — and is always returned.
+    /// </summary>
+    public static RequirementSetDto FilterByAudience(RequirementSetDto set, VisibilityLevel[]? allowed)
+    {
+        if (allowed is null)
+        {
+            return set;
+        }
+
+        bool Allowed(VisibilityLevel? level) => allowed.Contains(level ?? VisibilityLevel.Internal);
+
+        return set with
+        {
+            ResourceRequirements = [.. set.ResourceRequirements.Where(r => Allowed(r.VisibilityLevel))],
+            CapabilityRequirements = set.CapabilityRequirements is null ? null : [.. set.CapabilityRequirements.Where(c => Allowed(c.VisibilityLevel))],
+            CertificationRequirements = set.CertificationRequirements is null ? null : [.. set.CertificationRequirements.Where(c => Allowed(c.VisibilityLevel))],
+            CapacityRequirements = set.CapacityRequirements is null ? null : [.. set.CapacityRequirements.Where(c => Allowed(c.VisibilityLevel))],
+            TimeRequirement = Allowed(set.TimeRequirement?.VisibilityLevel) ? set.TimeRequirement : null,
+            LocationRequirement = Allowed(set.LocationRequirement?.VisibilityLevel) ? set.LocationRequirement : null,
+            ExecutionRequirement = Allowed(set.ExecutionRequirement?.VisibilityLevel) ? set.ExecutionRequirement : null,
+            TravelRequirement = Allowed(set.TravelRequirement?.VisibilityLevel) ? set.TravelRequirement : null,
+            BufferRequirements = set.BufferRequirements is null ? null : [.. set.BufferRequirements.Where(b => Allowed(b.VisibilityLevel))],
+            DependencyRequirements = set.DependencyRequirements is null ? null : [.. set.DependencyRequirements.Where(d => Allowed(d.VisibilityLevel))],
+            Constraints = set.Constraints is null ? null : [.. set.Constraints.Where(c => Allowed(c.VisibilityLevel))],
+            Preferences = set.Preferences is null ? null : [.. set.Preferences.Where(p => Allowed(p.VisibilityLevel))],
+        };
     }
 
     private static string ToUpperSnakeCase(string camelCase)

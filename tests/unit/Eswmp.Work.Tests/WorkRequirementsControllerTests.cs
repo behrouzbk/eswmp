@@ -50,12 +50,36 @@ public class WorkRequirementsControllerTests
     {
         var templates = NewTemplatesController(db, tenantId);
         await templates.Create(new CreateTemplateRequest("DOG_WALK_STANDARD", "Standard Dog Walk", null, "DOG_WALKING"), "tpl-create");
-        await templates.ConfigureRequirements(await TemplateId(db, tenantId), 1, ValidDefinitionsJson());
+        await templates.ConfigureRequirements(await TemplateId(db, tenantId), 1, ValidDefinitionsJson(), "1");
         await templates.Activate(await TemplateId(db, tenantId), 1);
     }
 
     private static async Task<Guid> TemplateId(WorkDbContext db, Guid tenantId) =>
         (await db.RequirementTemplates.FirstAsync(t => t.TenantId == tenantId && t.Code == "DOG_WALK_STANDARD")).Id;
+
+    /// <summary>v2 delta (UX-03/UX-04) — a Resource requirement marked Customer-visible, a
+    /// Capability requirement left at the default (unset -> Internal), and a Capacity
+    /// requirement marked Customer-visible, so audience-filtering tests have a mix.</summary>
+    private static JsonElement DefinitionsWithVisibilityJson()
+    {
+        var dto = new RequirementSetDto(
+            ResourceRequirements: [new ResourceRoleRequirementDto("DOG_WALKER", ResourceCategory.Person, MinimumQuantity: 1, MaximumQuantity: 1, VisibilityLevel: VisibilityLevel.Customer)],
+            DurationRequirement: new DurationRequirementDto(DurationType.Fixed, EstimatedDurationMinutes: 60),
+            CapabilityRequirements: [new CapabilityRequirementDto("DOG_WALKING", RoleCode: "DOG_WALKER", Mandatory: true)],
+            CapacityRequirements: [new CapacityRequirementDto("PET_COUNT", 1, RoleCode: "DOG_WALKER", Unit: "COUNT", VisibilityLevel: VisibilityLevel.Customer)],
+            LocationRequirement: new LocationRequirementDto(LocationMode.CustomerLocation));
+
+        return JsonSerializer.Deserialize<JsonElement>(JsonSerializer.Serialize(dto, RequirementResolutionService.JsonOptions));
+    }
+
+    private async Task ActivateTemplateWithVisibility(WorkDbContext db, Guid tenantId, string code = "VISIBILITY_STANDARD")
+    {
+        var templates = NewTemplatesController(db, tenantId);
+        await templates.Create(new CreateTemplateRequest(code, "Visibility test template", null, "DOG_WALKING"), "tpl-create-" + code);
+        var templateId = (await db.RequirementTemplates.FirstAsync(t => t.TenantId == tenantId && t.Code == code)).Id;
+        await templates.ConfigureRequirements(templateId, 1, DefinitionsWithVisibilityJson(), "1");
+        await templates.Activate(templateId, 1);
+    }
 
     private static ResolveWorkRequirementRequest ResolveRequest(string sourceId = "demand-1", JsonElement? inputs = null) =>
         new("Demand", sourceId, SourceVersion: 1, TemplateCode: "DOG_WALK_STANDARD", Inputs: inputs);
@@ -295,5 +319,194 @@ public class WorkRequirementsControllerTests
         using var doc = JsonDocument.Parse(JsonSerializer.Serialize(ok.Value, CamelCase));
         Assert.False(string.IsNullOrWhiteSpace(doc.RootElement.GetProperty("summary").GetString()));
         Assert.True(doc.RootElement.GetProperty("derivedRequirements").GetArrayLength() > 0);
+    }
+
+    // v2 delta (UX-03/UX-04) — per-line visibility.
+
+    [Fact]
+    public async Task Resolve_WithVisibilityLevels_PersistsLineVisibility()
+    {
+        var tenantId = Guid.NewGuid();
+        await using var db = NewDb(tenantId);
+        await ActivateTemplateWithVisibility(db, tenantId);
+        var controller = NewController(db, tenantId);
+
+        await controller.Resolve(new ResolveWorkRequirementRequest("Demand", "demand-1", 1, "VISIBILITY_STANDARD", null), "resolve-key");
+
+        var wr = await db.WorkRequirements.FirstAsync();
+        var role = await db.ResourceRoleRequirements.FirstAsync(r => r.WorkRequirementId == wr.Id);
+        var capability = await db.CapabilityRequirements.FirstAsync(c => c.WorkRequirementId == wr.Id);
+        var visibilities = await db.RequirementLineVisibilities.Where(v => v.WorkRequirementId == wr.Id).ToListAsync();
+
+        Assert.Contains(visibilities, v => v.LineType == nameof(ResourceRoleRequirement) && v.LineId == role.Id && v.VisibilityLevel == VisibilityLevel.Customer && v.CustomerVisible);
+        Assert.Contains(visibilities, v => v.LineType == nameof(CapabilityRequirement) && v.LineId == capability.Id && v.VisibilityLevel == VisibilityLevel.Internal && !v.CustomerVisible);
+    }
+
+    [Fact]
+    public async Task GetResolved_AudienceCustomer_HidesInternalOnlyLines()
+    {
+        var tenantId = Guid.NewGuid();
+        await using var db = NewDb(tenantId);
+        await ActivateTemplateWithVisibility(db, tenantId);
+        var controller = NewController(db, tenantId);
+        await controller.Resolve(new ResolveWorkRequirementRequest("Demand", "demand-1", 1, "VISIBILITY_STANDARD", null), "resolve-key");
+        var wr = await db.WorkRequirements.FirstAsync();
+
+        var result = await controller.GetResolved(wr.Id, audience: "customer");
+
+        var ok = Assert.IsType<OkObjectResult>(result);
+        using var doc = JsonDocument.Parse(JsonSerializer.Serialize(ok.Value, CamelCase));
+        Assert.Equal(1, doc.RootElement.GetProperty("resourceRequirements").GetArrayLength());
+        Assert.Equal(1, doc.RootElement.GetProperty("capacityRequirements").GetArrayLength());
+        Assert.Equal(0, doc.RootElement.GetProperty("capabilityRequirements").GetArrayLength());
+    }
+
+    [Fact]
+    public async Task GetResolved_AudienceOmitted_ReturnsEveryLine()
+    {
+        var tenantId = Guid.NewGuid();
+        await using var db = NewDb(tenantId);
+        await ActivateTemplateWithVisibility(db, tenantId);
+        var controller = NewController(db, tenantId);
+        await controller.Resolve(new ResolveWorkRequirementRequest("Demand", "demand-1", 1, "VISIBILITY_STANDARD", null), "resolve-key");
+        var wr = await db.WorkRequirements.FirstAsync();
+
+        var result = await controller.GetResolved(wr.Id);
+
+        var ok = Assert.IsType<OkObjectResult>(result);
+        using var doc = JsonDocument.Parse(JsonSerializer.Serialize(ok.Value, CamelCase));
+        Assert.Equal(1, doc.RootElement.GetProperty("capabilityRequirements").GetArrayLength());
+    }
+
+    [Fact]
+    public async Task GetResolved_UnrecognizedAudience_ReturnsValidationFailed()
+    {
+        var tenantId = Guid.NewGuid();
+        await using var db = NewDb(tenantId);
+        await ActivateTemplateWithVisibility(db, tenantId);
+        var controller = NewController(db, tenantId);
+        await controller.Resolve(new ResolveWorkRequirementRequest("Demand", "demand-1", 1, "VISIBILITY_STANDARD", null), "resolve-key");
+        var wr = await db.WorkRequirements.FirstAsync();
+
+        var result = await controller.GetResolved(wr.Id, audience: "nonsense");
+
+        var status = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(StatusCodes.Status400BadRequest, status.StatusCode);
+    }
+
+    [Fact]
+    public async Task Explain_AudienceProvider_HidesInternalOnlyDerivedRequirements()
+    {
+        var tenantId = Guid.NewGuid();
+        await using var db = NewDb(tenantId);
+        await ActivateTemplateWithVisibility(db, tenantId);
+        var controller = NewController(db, tenantId);
+        await controller.Resolve(new ResolveWorkRequirementRequest("Demand", "demand-1", 1, "VISIBILITY_STANDARD", null), "resolve-key");
+        var wr = await db.WorkRequirements.FirstAsync();
+
+        var dispatcherResult = await controller.Explain(wr.Id);
+        var providerResult = await controller.Explain(wr.Id, audience: "provider");
+
+        using var dispatcherDoc = JsonDocument.Parse(JsonSerializer.Serialize(Assert.IsType<OkObjectResult>(dispatcherResult).Value, CamelCase));
+        using var providerDoc = JsonDocument.Parse(JsonSerializer.Serialize(Assert.IsType<OkObjectResult>(providerResult).Value, CamelCase));
+
+        // dispatcher sees the role (Customer) + the capacity line (Customer); provider sees the
+        // same two (Customer is a subset of [Customer, Provider]) — neither audience includes an
+        // Internal-only line here, so this asserts both still surface the Customer-visible ones.
+        Assert.True(dispatcherDoc.RootElement.GetProperty("derivedRequirements").GetArrayLength() > 0);
+        Assert.Equal(
+            dispatcherDoc.RootElement.GetProperty("derivedRequirements").GetArrayLength(),
+            providerDoc.RootElement.GetProperty("derivedRequirements").GetArrayLength());
+    }
+
+    [Fact]
+    public async Task Compare_CustomerVisibleOnlyWithInternalOnlyChange_ExcludesFromDiff()
+    {
+        var tenantId = Guid.NewGuid();
+        await using var db = NewDb(tenantId);
+        await ActivateStandardTemplate(db, tenantId);
+        var controller = NewController(db, tenantId);
+        await controller.Resolve(ResolveRequest(), "resolve-key");
+        var wr = await db.WorkRequirements.FirstAsync();
+
+        // ActivateStandardTemplate leaves every line at the default (unset -> Internal), so the
+        // capacity change below is an Internal-only change.
+        var changes = JsonSerializer.Deserialize<JsonElement>(JsonSerializer.Serialize(new
+        {
+            capacityRequirements = new[] { new { roleCode = "DOG_WALKER", dimensionCode = "PET_COUNT", quantity = 3 } },
+        }));
+        await controller.Revise(wr.Id, new ReviseWorkRequirementRequest(wr.RequirementVersion, "bump", changes), "revise-key");
+
+        var unfiltered = await controller.Compare(wr.Id, 1, 2);
+        var filtered = await controller.Compare(wr.Id, 1, 2, customerVisibleOnly: true);
+
+        using var unfilteredDoc = JsonDocument.Parse(JsonSerializer.Serialize(Assert.IsType<OkObjectResult>(unfiltered).Value, CamelCase));
+        using var filteredDoc = JsonDocument.Parse(JsonSerializer.Serialize(Assert.IsType<OkObjectResult>(filtered).Value, CamelCase));
+        var unfilteredCategories = unfilteredDoc.RootElement.GetProperty("changedCategories").EnumerateArray().Select(e => e.GetString()).ToList();
+        var filteredCategories = filteredDoc.RootElement.GetProperty("changedCategories").EnumerateArray().Select(e => e.GetString()).ToList();
+
+        Assert.Contains("capacityRequirements", unfilteredCategories);
+        Assert.DoesNotContain("capacityRequirements", filteredCategories);
+    }
+
+    // v2 delta (P3) — search + audit.
+
+    [Fact]
+    public async Task Search_FiltersByStatusAndWorkType()
+    {
+        var tenantId = Guid.NewGuid();
+        await using var db = NewDb(tenantId);
+        await ActivateStandardTemplate(db, tenantId);
+        var controller = NewController(db, tenantId);
+        await controller.Resolve(ResolveRequest("demand-1"), "resolve-key-1");
+        await controller.Resolve(ResolveRequest("demand-2"), "resolve-key-2");
+        var wr = await db.WorkRequirements.FirstAsync(w => w.SourceId == "demand-1");
+        await controller.Cancel(wr.Id);
+
+        var result = await controller.Search(new SearchWorkRequirementsRequest(Status: WorkRequirementStatus.Cancelled, WorkType: "DOG_WALKING"));
+
+        var ok = Assert.IsType<OkObjectResult>(result);
+        using var doc = JsonDocument.Parse(JsonSerializer.Serialize(ok.Value, CamelCase));
+        var items = doc.RootElement.GetProperty("items");
+        Assert.Equal(1, items.GetArrayLength());
+        Assert.Equal(1, doc.RootElement.GetProperty("totalCount").GetInt32());
+    }
+
+    [Fact]
+    public async Task Audit_ReturnsOrderedVersionHistory()
+    {
+        var tenantId = Guid.NewGuid();
+        await using var db = NewDb(tenantId);
+        await ActivateStandardTemplate(db, tenantId);
+        var controller = NewController(db, tenantId);
+        await controller.Resolve(ResolveRequest(), "resolve-key");
+        var wr = await db.WorkRequirements.FirstAsync();
+        var changes = JsonSerializer.Deserialize<JsonElement>(JsonSerializer.Serialize(new
+        {
+            capacityRequirements = new[] { new { roleCode = "DOG_WALKER", dimensionCode = "PET_COUNT", quantity = 3 } },
+        }));
+        await controller.Revise(wr.Id, new ReviseWorkRequirementRequest(wr.RequirementVersion, "bump", changes), "revise-key");
+
+        var result = await controller.Audit(wr.Id);
+
+        var ok = Assert.IsType<OkObjectResult>(result);
+        using var doc = JsonDocument.Parse(JsonSerializer.Serialize(ok.Value, CamelCase));
+        var entries = doc.RootElement.GetProperty("entries").EnumerateArray().ToList();
+        Assert.Equal(2, entries.Count);
+        Assert.Equal(1, entries[0].GetProperty("version").GetInt32());
+        Assert.Equal(2, entries[1].GetProperty("version").GetInt32());
+    }
+
+    [Fact]
+    public async Task Audit_UnknownId_ReturnsNotFound()
+    {
+        var tenantId = Guid.NewGuid();
+        await using var db = NewDb(tenantId);
+        var controller = NewController(db, tenantId);
+
+        var result = await controller.Audit(Guid.NewGuid());
+
+        var status = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(StatusCodes.Status404NotFound, status.StatusCode);
     }
 }

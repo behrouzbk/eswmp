@@ -6,7 +6,7 @@
 > **Companion docs:** `docs/Azure/DEPLOYMENT-WORKFLOW-GUIDE.md` (deploying
 > code/infra changes to QA), `docs/api/INDEX.md` (the target domain map this
 > platform is being built against).
-> **Last updated:** 2026-07-19.
+> **Last updated:** 2026-07-23.
 
 ---
 
@@ -691,7 +691,7 @@ version, never an edit in place.
 | `POST /api/v1/work-requirement-templates/search` | `workrequirement.template.read` | Paged search (`workType`, `status`) | — |
 | `POST /api/v1/work-requirement-templates/{id}/versions` | `workrequirement.template.update` | New Draft version | **Yes** |
 | `GET /api/v1/work-requirement-templates/{id}/versions/{version}` | `workrequirement.template.read` | Get one version | — |
-| `PUT /api/v1/work-requirement-templates/{id}/versions/{version}/requirements` | `workrequirement.template.update` | Set the full `RequirementSetDto` body (only while Draft) | — |
+| `PUT /api/v1/work-requirement-templates/{id}/versions/{version}/requirements` | `workrequirement.template.update` | Set the full `RequirementSetDto` body (only while Draft). **Requires `If-Match`** (v2 delta, see below) | — |
 | `POST /api/v1/work-requirement-templates/{id}/versions/{version}/activate` | `workrequirement.template.activate` | Draft → Active (validates first; supersedes prior active version) | — |
 | `POST /api/v1/work-requirement-templates/{id}/retire` | `workrequirement.template.retire` | → Retired | — |
 
@@ -707,7 +707,11 @@ $requirements = @{
     durationRequirement = @{ durationType = "Estimated"; estimatedDurationMinutes = 60 }
 } | ConvertTo-Json -Depth 6
 
-Invoke-RestMethod -Method Put -Uri "$GW/api/v1/work-requirement-templates/$($template.id)/versions/1/requirements" -Headers $Headers -ContentType "application/json" -Body $requirements
+# v2 delta (UX-08): If-Match is required and must equal the version's current rowVersion
+# (a freshly-created Draft version starts at 1); mismatch returns 412 VERSION_CONFLICT.
+$configureHeaders = $Headers + @{ "If-Match" = "1" }
+$configured = Invoke-RestMethod -Method Put -Uri "$GW/api/v1/work-requirement-templates/$($template.id)/versions/1/requirements" -Headers $configureHeaders -ContentType "application/json" -Body $requirements
+$configured.rowVersion   # now 2 — pass this as If-Match on the next PUT to this version
 Invoke-RestMethod -Method Post -Uri "$GW/api/v1/work-requirement-templates/$($template.id)/versions/1/activate" -Headers $Headers -ContentType "application/json" -Body '{}'
 ```
 
@@ -719,6 +723,22 @@ fields of the `RequirementSetDto` body — every other category
 `constraints`, `preferences`) is optional. Full shape:
 `src/Eswmp.Work/Services/RequirementSetDto.cs`. `ResourceCategory`: `Person,
 Team, Vehicle, Facility, Room, Equipment, VirtualResource`.
+
+**v2 delta — per-line visibility:** every item in every category above may
+carry an optional `visibilityLevel` (`Customer` \| `Provider` \| `Internal`,
+defaults to `Internal` if omitted):
+
+```powershell
+$requirementsWithVisibility = @{
+    resourceRequirements = @(
+        @{ roleCode = "Driver"; resourceCategory = "Person"; minimumQuantity = 1; required = $true; visibilityLevel = "Customer" }
+    )
+    durationRequirement = @{ durationType = "Estimated"; estimatedDurationMinutes = 60 }
+} | ConvertTo-Json -Depth 6
+```
+
+`visibilityLevel` drives the `?audience=`/`?customerVisibleOnly=` filters on
+the Work Requirement endpoints below (§18).
 
 ---
 
@@ -734,12 +754,14 @@ operation is **resolve**: Demand + Template → an operational `WorkRequirement`
 | `POST /api/v1/work-requirements/resolve` | `workrequirement.resolve` | Materialize a template into a `WorkRequirement` (`201`) | **Yes** |
 | `GET /api/v1/work-requirements/{id}` | `workrequirement.read` | Summary view | — |
 | `GET /api/v1/work-requirements/{id}/versions/{version}` | `workrequirement.read` | One historical snapshot | — |
-| `GET /api/v1/work-requirements/{id}/resolved` | `workrequirement.read` | Full resolved contract (every requirement category) | — |
+| `GET /api/v1/work-requirements/{id}/resolved?audience=` | `workrequirement.read` | Full resolved contract, filtered by audience (v2 delta — see below) | — |
 | `POST /api/v1/work-requirements/{id}/validate` | `workrequirement.validate` | Re-run the 7-category validator | — |
 | `POST /api/v1/work-requirements/{id}/revisions` | `workrequirement.revise` | Patch named categories (`changes` body), bumps `requirementVersion` | **Yes** |
-| `GET /api/v1/work-requirements/{id}/compare?fromVersion=&toVersion=` | `workrequirement.read` | Diff two versions' snapshots | — |
-| `GET /api/v1/work-requirements/{id}/explain` | `workrequirement.explain` | Human-readable summary + per-requirement provenance | — |
+| `GET /api/v1/work-requirements/{id}/compare?fromVersion=&toVersion=&customerVisibleOnly=` | `workrequirement.read` | Diff two versions' snapshots, optionally restricted to customer-visible lines (v2 delta) | — |
+| `GET /api/v1/work-requirements/{id}/explain?audience=` | `workrequirement.explain` | Human-readable summary + per-requirement provenance, filtered by audience (v2 delta) | — |
 | `POST /api/v1/work-requirements/{id}/cancel` | `workrequirement.revise` | → Cancelled (terminal) | — |
+| `GET /api/v1/work-requirements/search` | `workrequirement.read` | Paged search (`status`, `workType`, `sourceType`, `sourceId`, `templateId`) — v2 delta, new | — |
+| `GET /api/v1/work-requirements/{id}/audit` | `workrequirement.read` | Ordered `RequirementVersion` history as a flat audit trail — v2 delta, new | — |
 
 **Resolve against the template from §17:**
 
@@ -783,6 +805,28 @@ Invoke-RestMethod -Method Post -Uri "$GW/api/v1/work-requirements/$($wr.workRequ
 — `412 VERSION_CONFLICT` otherwise. Valid `WorkRequirementStatus`: `Draft,
 Validating, Valid, Invalid, Superseded, Cancelled, Completed`
 (`Cancelled`/`Completed` are terminal — further revise/cancel calls `409`).
+
+**v2 delta — audience-filtered reads, search, audit:**
+
+```powershell
+# Only lines marked visibilityLevel=Customer at configure/resolve time
+Invoke-RestMethod -Uri "$GW/api/v1/work-requirements/$($wr.workRequirementId)/resolved?audience=customer" -Headers $Headers
+Invoke-RestMethod -Uri "$GW/api/v1/work-requirements/$($wr.workRequirementId)/explain?audience=provider" -Headers $Headers
+
+# Restrict a version diff to customer-visible change only
+Invoke-RestMethod -Uri "$GW/api/v1/work-requirements/$($wr.workRequirementId)/compare?fromVersion=1&toVersion=2&customerVisibleOnly=true" -Headers $Headers
+
+# Paged search
+Invoke-RestMethod -Uri "$GW/api/v1/work-requirements/search?status=Valid&workType=Delivery" -Headers $Headers
+
+# Unified audit trail (flat, version-ordered)
+Invoke-RestMethod -Uri "$GW/api/v1/work-requirements/$($wr.workRequirementId)/audit" -Headers $Headers
+```
+
+`audience` accepts `customer`, `provider`, or `dispatcher` (default —
+unfiltered, today's behavior); an unrecognized value returns
+`400 VALIDATION_FAILED`. `durationRequirement` is exempt from filtering — it's
+structurally required on every resolved contract.
 
 ---
 

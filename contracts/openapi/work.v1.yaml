@@ -271,6 +271,27 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/PagedWorkRequirementResult'
+    get:
+      tags: [WorkRequirements]
+      summary: >
+        v2 delta (P3) — paged search over the reconciled WorkRequirement
+        aggregate (WorkRequirementsController, distinct from the POST above,
+        which belongs to the first-generation RequirementDefinition module).
+      parameters:
+        - { name: status, in: query, schema: { $ref: '#/components/schemas/ReconciledWorkRequirementStatus' } }
+        - { name: workType, in: query, schema: { type: string } }
+        - { name: sourceType, in: query, schema: { type: string } }
+        - { name: sourceId, in: query, schema: { type: string } }
+        - { name: templateId, in: query, schema: { type: string, format: uuid } }
+        - { name: page, in: query, schema: { type: integer, default: 1 } }
+        - { name: pageSize, in: query, schema: { type: integer, default: 20 } }
+      responses:
+        '200':
+          description: Paged reconciled WorkRequirement list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PagedReconciledWorkRequirementResult'
 
   /api/v1/work-requirements/{id}:
     get:
@@ -444,6 +465,162 @@ paths:
                 $ref: '#/components/schemas/RequirementSnapshot'
         '404':
           description: Not found
+
+  # ── v2 delta additions below (docs/API/specs/update_requirement-schema.sql,
+  # docs/API/specs/v2-delta-summary.docx §3) — the reconciled WorkRequirement/
+  # RequirementTemplate API (WorkRequirementsController /
+  # RequirementTemplatesController) was never previously documented here; only
+  # the endpoints this delta touches are added, not the whole surface. ──
+
+  /api/v1/work-requirements/{id}/resolved:
+    get:
+      tags: [WorkRequirements]
+      summary: >
+        v2 delta (UX-03/UX-04, revised) — full resolved requirement contract.
+        Now accepts ?audience= to filter lines by disclosure level; server-side
+        filtering, not client-side.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - name: audience
+          in: query
+          description: customer | provider | dispatcher (default). Unrecognized values return 400.
+          schema: { type: string, enum: [customer, provider, dispatcher] }
+      responses:
+        '200':
+          description: Resolved requirement contract, filtered to the requested audience
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResolvedWorkRequirementResponse'
+        '400':
+          description: Unrecognized audience (code=VALIDATION_FAILED)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+        '404':
+          description: Not found
+        '409':
+          description: WorkRequirement is Invalid and cannot be read as a resolved contract
+
+  /api/v1/work-requirements/{id}/explain:
+    get:
+      tags: [WorkRequirements]
+      summary: >
+        v2 delta (UX-03/UX-04, revised) — human-readable summary + per-requirement
+        provenance. Now accepts ?audience= like GET .../resolved.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - name: audience
+          in: query
+          description: customer | provider | dispatcher (default)
+          schema: { type: string, enum: [customer, provider, dispatcher] }
+      responses:
+        '200':
+          description: Explain result, filtered to the requested audience
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExplainResponse'
+        '400':
+          description: Unrecognized audience (code=VALIDATION_FAILED)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+        '404':
+          description: Not found
+
+  /api/v1/work-requirements/{id}/compare:
+    get:
+      tags: [WorkRequirements]
+      summary: >
+        v2 delta (UX-04, revised) — diff two RequirementVersion snapshots. Now
+        accepts ?customerVisibleOnly= to restrict the diff to customer-visible
+        lines, which is what drives approval scope for a customer-facing change.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: fromVersion, in: query, required: true, schema: { type: integer } }
+        - { name: toVersion, in: query, required: true, schema: { type: integer } }
+        - { name: customerVisibleOnly, in: query, schema: { type: boolean, default: false } }
+      responses:
+        '200':
+          description: Diff between the two versions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CompareResponse'
+        '404':
+          description: One or both versions not found
+
+  /api/v1/work-requirements/{id}/audit:
+    get:
+      tags: [WorkRequirements]
+      summary: >
+        v2 delta (P3, new) — unified audit trail across RequirementVersions. No
+        separate "override" entity exists in this module; this is the same
+        version history GetVersion/Compare already read, as a flat list.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: Ordered audit entries
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkRequirementAuditResponse'
+        '404':
+          description: Not found
+
+  /api/v1/work-requirement-templates/{templateId}/versions/{version}/requirements:
+    put:
+      tags: [WorkRequirementTemplates]
+      summary: >
+        v2 delta (UX-08, revised) — set a Draft template version's full
+        requirement set. Now requires If-Match against the version's
+        RowVersion; two authors editing the same draft can no longer silently
+        overwrite each other.
+      parameters:
+        - { name: templateId, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: version, in: path, required: true, schema: { type: integer } }
+        - name: If-Match
+          in: header
+          required: true
+          description: The template version's current rowVersion. Mismatch returns 412.
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RequirementSetDto'
+      responses:
+        '200':
+          description: Updated template version (rowVersion incremented)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RequirementTemplateVersionDto'
+        '400':
+          description: Missing/malformed If-Match header, or the body failed validation (code=VALIDATION_FAILED)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+        '404':
+          description: Not found
+        '409':
+          description: Version is not Draft (code=TEMPLATE_IMMUTABLE)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+        '412':
+          description: If-Match does not match the version's current rowVersion (code=VERSION_CONFLICT)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+        '422':
+          description: The requirement set contains incompatible constraints (code=INVALID_WORK_REQUIREMENT)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
 
 components:
   securitySchemes:
@@ -814,3 +991,205 @@ components:
           type: string
           description: Serialized copy of the RequirementVersion + its children at freeze time
         reason: { type: string, nullable: true }
+
+    # ── v2 delta schemas — the reconciled WorkRequirement/RequirementTemplate
+    # model (Eswmp.Work.Models.WorkRequirement, RequirementTemplate). Distinct
+    # names from the legacy schemas above (WorkRequirement, WorkRequirementStatus,
+    # PagedWorkRequirementResult, ...), which belong to the unrelated
+    # first-generation RequirementDefinition module and must not be reused here.
+
+    RequirementLineVisibilityLevel:
+      type: string
+      description: >
+        Per-line disclosure level (v2 delta, UX-03/UX-04). Unset on a line
+        defaults to Internal — the safe choice.
+      enum: [Customer, Provider, Internal]
+
+    ReconciledWorkRequirementStatus:
+      type: string
+      enum: [Draft, Validating, Valid, Invalid, Superseded, Cancelled, Completed]
+
+    ReconciledWorkRequirementPriority:
+      type: string
+      enum: [Low, Normal, High, Urgent, Critical]
+
+    ReconciledWorkRequirementSummary:
+      type: object
+      required: [id, tenantId, sourceType, sourceId, workType, status, priority, requirementVersion, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        tenantId: { type: string, format: uuid }
+        sourceType: { type: string }
+        sourceId: { type: string }
+        sourceVersion: { type: integer, nullable: true }
+        templateId: { type: string, format: uuid, nullable: true }
+        templateCode: { type: string, nullable: true }
+        templateVersion: { type: integer, nullable: true }
+        workType: { type: string }
+        workCategory: { type: string, nullable: true }
+        serviceMode: { type: string, nullable: true }
+        status: { $ref: '#/components/schemas/ReconciledWorkRequirementStatus' }
+        priority: { $ref: '#/components/schemas/ReconciledWorkRequirementPriority' }
+        effectiveFrom: { type: string, format: date-time, nullable: true }
+        effectiveTo: { type: string, format: date-time, nullable: true }
+        requirementVersion: { type: integer }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time, nullable: true }
+
+    PagedReconciledWorkRequirementResult:
+      type: object
+      required: [items, page, pageSize, totalCount]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/ReconciledWorkRequirementSummary' }
+        page: { type: integer }
+        pageSize: { type: integer }
+        totalCount: { type: integer }
+
+    RequirementLineDto:
+      type: object
+      description: >
+        Shared shape of every per-line item below (resourceRequirements,
+        capabilityRequirements, ...): the category-specific fields plus the
+        two v2 delta additions, id and visibilityLevel. additionalProperties
+        carries the category-specific fields — full shape per category is
+        src/Eswmp.Work/Services/RequirementSetDto.cs.
+      additionalProperties: true
+      properties:
+        id: { type: string, format: uuid, nullable: true, description: Set on read (GET .../resolved); ignored on write. }
+        visibilityLevel:
+          allOf: [{ $ref: '#/components/schemas/RequirementLineVisibilityLevel' }]
+          nullable: true
+          description: Settable on write (PUT .../requirements); defaults to Internal if omitted.
+
+    RequirementSetDto:
+      type: object
+      required: [resourceRequirements, durationRequirement]
+      description: >
+        The one shape shared by PUT .../work-requirement-templates/{id}/versions/{v}/requirements
+        (request body) and GET /work-requirements/{id}/resolved (response body).
+        Full per-category field shape: src/Eswmp.Work/Services/RequirementSetDto.cs.
+      properties:
+        resourceRequirements:
+          type: array
+          items: { $ref: '#/components/schemas/RequirementLineDto' }
+        durationRequirement: { $ref: '#/components/schemas/RequirementLineDto' }
+        capabilityRequirements:
+          type: array
+          nullable: true
+          items: { $ref: '#/components/schemas/RequirementLineDto' }
+        certificationRequirements:
+          type: array
+          nullable: true
+          items: { $ref: '#/components/schemas/RequirementLineDto' }
+        capacityRequirements:
+          type: array
+          nullable: true
+          items: { $ref: '#/components/schemas/RequirementLineDto' }
+        timeRequirement:
+          allOf: [{ $ref: '#/components/schemas/RequirementLineDto' }]
+          nullable: true
+        locationRequirement:
+          allOf: [{ $ref: '#/components/schemas/RequirementLineDto' }]
+          nullable: true
+        executionRequirement:
+          allOf: [{ $ref: '#/components/schemas/RequirementLineDto' }]
+          nullable: true
+        travelRequirement:
+          allOf: [{ $ref: '#/components/schemas/RequirementLineDto' }]
+          nullable: true
+        bufferRequirements:
+          type: array
+          nullable: true
+          items: { $ref: '#/components/schemas/RequirementLineDto' }
+        dependencyRequirements:
+          type: array
+          nullable: true
+          items: { $ref: '#/components/schemas/RequirementLineDto' }
+        constraints:
+          type: array
+          nullable: true
+          items: { $ref: '#/components/schemas/RequirementLineDto' }
+        preferences:
+          type: array
+          nullable: true
+          items: { $ref: '#/components/schemas/RequirementLineDto' }
+
+    ResolvedWorkRequirementResponse:
+      allOf:
+        - type: object
+          required: [workRequirementId, requirementVersion, workType]
+          properties:
+            workRequirementId: { type: string, format: uuid }
+            requirementVersion: { type: integer }
+            workType: { type: string }
+        - $ref: '#/components/schemas/RequirementSetDto'
+
+    DerivedRequirementExplanation:
+      type: object
+      required: [requirement, source]
+      properties:
+        requirement: { type: string }
+        source: { type: string }
+
+    ExplainResponse:
+      type: object
+      required: [summary, derivedRequirements]
+      properties:
+        summary: { type: string }
+        derivedRequirements:
+          type: array
+          items: { $ref: '#/components/schemas/DerivedRequirementExplanation' }
+
+    CompareResponse:
+      type: object
+      required: [workRequirementId, fromVersion, toVersion, changedCategories, details]
+      properties:
+        workRequirementId: { type: string, format: uuid }
+        fromVersion: { type: integer }
+        toVersion: { type: integer }
+        changedCategories:
+          type: array
+          items: { type: string }
+        details:
+          type: object
+          description: Keyed by changed category; each value is { before, after }.
+          additionalProperties: true
+
+    WorkRequirementAuditEntry:
+      type: object
+      required: [version]
+      properties:
+        version: { type: integer }
+        changeType: { type: string, nullable: true }
+        changeReason: { type: string, nullable: true }
+        createdAt: { type: string, format: date-time }
+        createdBy: { type: string, nullable: true }
+
+    WorkRequirementAuditResponse:
+      type: object
+      required: [workRequirementId, entries]
+      properties:
+        workRequirementId: { type: string, format: uuid }
+        entries:
+          type: array
+          items: { $ref: '#/components/schemas/WorkRequirementAuditEntry' }
+
+    RequirementTemplateVersionDto:
+      type: object
+      required: [id, tenantId, templateId, version, status, definitionJson, rowVersion]
+      properties:
+        id: { type: string, format: uuid }
+        tenantId: { type: string, format: uuid }
+        templateId: { type: string, format: uuid }
+        version: { type: integer }
+        effectiveFrom: { type: string, format: date-time, nullable: true }
+        effectiveTo: { type: string, format: date-time, nullable: true }
+        status: { type: string, enum: [Draft, Active, Superseded, Retired] }
+        changeReason: { type: string, nullable: true }
+        definitionJson: { type: string }
+        rowVersion:
+          type: integer
+          format: int64
+          description: v2 delta (UX-08) concurrency guard — pass back as If-Match on the next PUT.

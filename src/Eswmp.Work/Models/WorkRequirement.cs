@@ -79,6 +79,10 @@ public class WorkRequirement : TenantScopedEntity
     public List<DependencyRequirement> DependencyRequirements { get; set; } = [];
     public List<RequirementConstraint> Constraints { get; set; } = [];
     public List<RequirementPreference> Preferences { get; set; } = [];
+
+    /// <summary>Per-line disclosure control (v2 delta, UX-03/UX-04) — one row per requirement
+    /// line, keyed by (LineType, LineId). See Eswmp.Work.Models.RequirementLineVisibility.</summary>
+    public List<RequirementLineVisibility> LineVisibilities { get; set; } = [];
 }
 
 /// <summary>

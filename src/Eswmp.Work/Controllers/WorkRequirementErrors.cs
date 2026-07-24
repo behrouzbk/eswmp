@@ -34,7 +34,7 @@ internal static class WorkRequirementControllerExtensions
         controller.ErrorResult(StatusCodes.Status409Conflict, "IDEMPOTENCY_CONFLICT",
             $"Idempotency-Key '{idempotencyKey}' was already used with a different request body.");
 
-    public static ObjectResult VersionConflict(this ControllerBase controller, int expectedVersion, int? currentVersion) =>
+    public static ObjectResult VersionConflict(this ControllerBase controller, long expectedVersion, long? currentVersion) =>
         controller.ErrorResult(StatusCodes.Status412PreconditionFailed, "VERSION_CONFLICT",
             currentVersion is null
                 ? $"Expected version {expectedVersion} no longer matches the current version."

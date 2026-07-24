@@ -114,10 +114,10 @@ public class RequirementTemplatesControllerTests
         await using var db = NewDb(tenantId);
         var template = await CreateTemplate(db, tenantId);
         var controller = NewController(db, tenantId);
-        await controller.ConfigureRequirements(template.Id, 1, ValidDefinitionsJson());
+        await controller.ConfigureRequirements(template.Id, 1, ValidDefinitionsJson(), "1");
         await controller.Activate(template.Id, 1);
 
-        var result = await controller.ConfigureRequirements(template.Id, 1, ValidDefinitionsJson());
+        var result = await controller.ConfigureRequirements(template.Id, 1, ValidDefinitionsJson(), "2");
 
         var status = Assert.IsType<ObjectResult>(result);
         Assert.Equal(StatusCodes.Status409Conflict, status.StatusCode);
@@ -136,10 +136,52 @@ public class RequirementTemplatesControllerTests
             DurationRequirement: new DurationRequirementDto(DurationType.Fixed, EstimatedDurationMinutes: 60));
         var invalidJson = JsonSerializer.Deserialize<JsonElement>(JsonSerializer.Serialize(invalidDto, RequirementResolutionService.JsonOptions));
 
-        var result = await controller.ConfigureRequirements(template.Id, 1, invalidJson);
+        var result = await controller.ConfigureRequirements(template.Id, 1, invalidJson, "1");
 
         var status = Assert.IsType<ObjectResult>(result);
         Assert.Equal(StatusCodes.Status422UnprocessableEntity, status.StatusCode);
+    }
+
+    [Fact]
+    public async Task ConfigureRequirements_MissingIfMatch_ReturnsBadRequest()
+    {
+        var tenantId = Guid.NewGuid();
+        await using var db = NewDb(tenantId);
+        var template = await CreateTemplate(db, tenantId);
+        var controller = NewController(db, tenantId);
+
+        var result = await controller.ConfigureRequirements(template.Id, 1, ValidDefinitionsJson(), ifMatch: null);
+
+        var status = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(StatusCodes.Status400BadRequest, status.StatusCode);
+    }
+
+    [Fact]
+    public async Task ConfigureRequirements_StaleIfMatch_ReturnsPreconditionFailed()
+    {
+        var tenantId = Guid.NewGuid();
+        await using var db = NewDb(tenantId);
+        var template = await CreateTemplate(db, tenantId);
+        var controller = NewController(db, tenantId);
+
+        var result = await controller.ConfigureRequirements(template.Id, 1, ValidDefinitionsJson(), ifMatch: "999");
+
+        var status = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(StatusCodes.Status412PreconditionFailed, status.StatusCode);
+    }
+
+    [Fact]
+    public async Task ConfigureRequirements_ValidIfMatch_IncrementsRowVersion()
+    {
+        var tenantId = Guid.NewGuid();
+        await using var db = NewDb(tenantId);
+        var template = await CreateTemplate(db, tenantId);
+        var controller = NewController(db, tenantId);
+
+        var result = await controller.ConfigureRequirements(template.Id, 1, ValidDefinitionsJson(), ifMatch: "1");
+
+        var version = Assert.IsType<RequirementTemplateVersion>(Assert.IsType<OkObjectResult>(result).Value);
+        Assert.Equal(2, version.RowVersion);
     }
 
     [Fact]
@@ -149,7 +191,7 @@ public class RequirementTemplatesControllerTests
         await using var db = NewDb(tenantId);
         var template = await CreateTemplate(db, tenantId);
         var controller = NewController(db, tenantId);
-        await controller.ConfigureRequirements(template.Id, 1, ValidDefinitionsJson());
+        await controller.ConfigureRequirements(template.Id, 1, ValidDefinitionsJson(), "1");
 
         var result = await controller.Activate(template.Id, 1);
 
@@ -166,11 +208,11 @@ public class RequirementTemplatesControllerTests
         await using var db = NewDb(tenantId);
         var template = await CreateTemplate(db, tenantId);
         var controller = NewController(db, tenantId);
-        await controller.ConfigureRequirements(template.Id, 1, ValidDefinitionsJson());
+        await controller.ConfigureRequirements(template.Id, 1, ValidDefinitionsJson(), "1");
         await controller.Activate(template.Id, 1);
 
         await controller.CreateVersion(template.Id, new CreateTemplateVersionRequest("bump"), "version-key");
-        await controller.ConfigureRequirements(template.Id, 2, ValidDefinitionsJson());
+        await controller.ConfigureRequirements(template.Id, 2, ValidDefinitionsJson(), "1");
         await controller.Activate(template.Id, 2);
 
         var v1 = await db.RequirementTemplateVersions.FirstAsync(v => v.TemplateId == template.Id && v.Version == 1);

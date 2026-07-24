@@ -996,3 +996,113 @@ shared error envelope, the /api/v1 prefix, the concrete status-code
 mapping, the Demand adapter, and the security hardening detail --- each
 adopted so that Work Requirement and Demand Intake present one coherent
 domain surface. Section 12 lists what to confirm before implementation.*
+
+# **13. v2 Delta (2026-07-23) --- concurrency, per-line visibility, search & audit**
+
+*Source: docs/API/specs/update_requirement-schema.sql and
+docs/API/specs/v2-delta-summary.docx §3 "Work Requirement", driven by the
+Demand & Intake Domain UX architecture review. Three data-model changes,
+six endpoint changes (four revised, two new).*
+
+## **13.1 Template concurrency --- rowVersion**
+
+Every RequirementTemplateVersion now carries a **rowVersion** (integer
+counter, starts at 1). **PUT
+/api/v1/work-requirement-templates/{templateId}/versions/{version}/requirements**
+now **requires** an **If-Match** header carrying the version\'s current
+rowVersion --- two authors editing the same Draft version can no longer
+silently overwrite each other (UX-08).
+
+  -----------------------------------------------------------------------
+  **Code**   **When**                    **Body**
+  ---------- --------------------------- ------------------------------------
+  **200**    If-Match matched; saved     TemplateVersion (rowVersion + 1)
+
+  **400**    If-Match header missing/    error + code=VALIDATION_FAILED
+             malformed
+
+  **412**    If-Match does not match     error + code=VERSION_CONFLICT
+             current rowVersion
+  -----------------------------------------------------------------------
+
+The response\'s rowVersion is what the caller passes as If-Match on the
+*next* PUT.
+
+## **13.2 Per-line visibility --- visibilityLevel**
+
+Every item in a RequirementSetDto (§3.2) --- every resourceRequirement,
+capabilityRequirement, certificationRequirement, capacityRequirement,
+durationRequirement, timeRequirement, locationRequirement,
+executionRequirement, travelRequirement, bufferRequirement,
+dependencyRequirement, constraint, and preference --- now carries two
+additional fields:
+
+  -----------------------------------------------------------------------
+  **Field**          **Type**    **Notes**
+  ------------------ ----------- ----------------------------------------
+  id                 uuid        Set on read (GET .../resolved); ignored
+                                  on write (PUT .../requirements)
+
+  visibilityLevel    enum?       Customer \| Provider \| Internal.
+                                  Settable on write; defaults to Internal
+                                  when omitted --- the safe choice, since
+                                  "no explicit disclosure grant" means
+                                  "don\'t disclose."
+  -----------------------------------------------------------------------
+
+Persisted as one row per line in requirement.RequirementLineVisibility,
+keyed by (lineType, lineId) rather than as a column repeated across
+every requirement-line table --- explain/resolved/compare all assemble
+their output from many sources, and this keeps the disclosure filter in
+one place. customerVisible is derived (true only when visibilityLevel =
+Customer) and enforced consistent with visibilityLevel by a CHECK
+constraint.
+
+## **13.3 Audience-filtered reads**
+
+Three existing endpoints gain an audience filter --- **server-side, not
+client-side**: a customer surface that receives the full requirement and
+hides fields in the browser has still transmitted internal operational
+data.
+
+  -----------------------------------------------------------------------
+  **Endpoint**                           **New parameter**
+  --------------------------------------- -----------------------------------
+  GET /work-requirements/{id}/resolved   ?audience=customer\|provider\|dispatcher
+                                          (default)
+
+  GET /work-requirements/{id}/explain    ?audience=customer\|provider\|dispatcher
+                                          (default)
+
+  GET /work-requirements/{id}/compare    ?customerVisibleOnly=true\|false
+                                          (default false)
+  -----------------------------------------------------------------------
+
+Audience → allowed visibilityLevel set: customer → \[Customer\];
+provider → \[Customer, Provider\]; dispatcher (or omitted) →
+unfiltered, today\'s behaviour. An unrecognized audience value returns
+400 VALIDATION_FAILED. durationRequirement is exempt from filtering ---
+it is structurally required on every resolved contract and is always
+returned.
+
+## **13.4 New endpoints**
+
+**GET /api/v1/work-requirements/search workrequirement.read**
+
+Paged search over the WorkRequirement aggregate: status, workType,
+sourceType, sourceId, templateId, page, pageSize.
+
+**GET /api/v1/work-requirements/{id}/audit workrequirement.read**
+
+Unified audit trail --- the same RequirementVersion history
+GetVersion/Compare already read (no separate "override" entity exists in
+this module), returned as a flat, version-ordered list of {version,
+changeType, changeReason, createdAt, createdBy}.
+
+## **13.5 Contract**
+
+contracts/openapi/work.v1.yaml documents these six endpoints as of this
+delta. The rest of the reconciled WorkRequirement/RequirementTemplate
+surface (resolve, GetById, validate, revise, cancel, template
+create/version/activate/retire) predates this delta and remains
+undocumented in OpenAPI --- a pre-existing gap this delta does not close.

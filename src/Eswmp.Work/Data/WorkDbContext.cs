@@ -41,6 +41,7 @@ public class WorkDbContext(DbContextOptions<WorkDbContext> options, ITenantConte
     public DbSet<DependencyRequirement> DependencyRequirements => Set<DependencyRequirement>();
     public DbSet<RequirementConstraint> Constraints => Set<RequirementConstraint>();
     public DbSet<RequirementPreference> Preferences => Set<RequirementPreference>();
+    public DbSet<RequirementLineVisibility> RequirementLineVisibilities => Set<RequirementLineVisibility>();
     public DbSet<WorkRequirementIdempotencyRecord> WorkRequirementIdempotencyRecords => Set<WorkRequirementIdempotencyRecord>();
     public DbSet<WorkRequirementOutboxMessage> WorkRequirementOutboxMessages => Set<WorkRequirementOutboxMessage>();
 
@@ -195,6 +196,11 @@ public class WorkDbContext(DbContextOptions<WorkDbContext> options, ITenantConte
             e.HasQueryFilter(x => x.TenantId == tenantContext.TenantId);
             e.Property(x => x.DefinitionJson).HasColumnType("jsonb");
             e.HasIndex(x => new { x.TemplateId, x.Version }).IsUnique();
+            // Concurrency guard (v2 delta, UX-08): checked manually against the PUT
+            // .../requirements request's If-Match header — mirrors ConfigureRequirements'
+            // existing no-EF-concurrency style rather than IsConcurrencyToken() (that pattern
+            // is reserved for Demand.Version elsewhere in this DbContext).
+            e.Property(x => x.RowVersion).HasDefaultValue(1L);
         });
 
         modelBuilder.Entity<WorkRequirement>(e =>
@@ -221,6 +227,7 @@ public class WorkDbContext(DbContextOptions<WorkDbContext> options, ITenantConte
             e.HasMany(x => x.DependencyRequirements).WithOne().HasForeignKey(x => x.WorkRequirementId).OnDelete(DeleteBehavior.Cascade);
             e.HasMany(x => x.Constraints).WithOne().HasForeignKey(x => x.WorkRequirementId).OnDelete(DeleteBehavior.Cascade);
             e.HasMany(x => x.Preferences).WithOne().HasForeignKey(x => x.WorkRequirementId).OnDelete(DeleteBehavior.Cascade);
+            e.HasMany(x => x.LineVisibilities).WithOne().HasForeignKey(x => x.WorkRequirementId).OnDelete(DeleteBehavior.Cascade);
         });
 
         modelBuilder.Entity<RequirementVersion>(e =>
@@ -344,6 +351,26 @@ public class WorkDbContext(DbContextOptions<WorkDbContext> options, ITenantConte
             e.HasQueryFilter(x => x.TenantId == tenantContext.TenantId);
             e.Property(x => x.Weight).HasColumnType("numeric(5,2)");
             e.HasIndex(x => x.WorkRequirementId);
+        });
+
+        modelBuilder.Entity<RequirementLineVisibility>(e =>
+        {
+            // v2 delta (UX-03/UX-04): per-line disclosure control. VisibilityLevel = 0 is
+            // Customer (see the enum's explicit values) — CustomerVisible can only be true
+            // when the level is Customer, so the two fields can't drift apart.
+            e.ToTable("RequirementLineVisibility", schema: "requirement", t => t.HasCheckConstraint(
+                "CK_RLV_Consistent", "\"CustomerVisible\" = false OR \"VisibilityLevel\" = 0"));
+            e.HasQueryFilter(x => x.TenantId == tenantContext.TenantId);
+            // No HasDefaultValue here: Customer (0) is both the enum's CLR default and would
+            // collide with EF's "unset sentinel" if a DB-level default were configured too,
+            // silently overwriting an explicitly-set Customer level with the DB default on
+            // insert. BuildVisibility always assigns VisibilityLevel explicitly, so an
+            // application-level default (there, defaulting to Internal) is sufficient.
+            e.HasIndex(x => new { x.LineType, x.LineId }).IsUnique();
+            e.HasIndex(x => new { x.TenantId, x.WorkRequirementId, x.VisibilityLevel });
+            // The WorkRequirementId FK/cascade is configured once, from the WorkRequirement
+            // side (HasMany(x => x.LineVisibilities) above), matching how every other
+            // requirement-line entity with a WorkRequirement navigation collection is wired.
         });
 
         modelBuilder.Entity<WorkRequirementIdempotencyRecord>(e =>
