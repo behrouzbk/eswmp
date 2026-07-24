@@ -6,7 +6,7 @@
 > **Companion docs:** `docs/Azure/DEPLOYMENT-WORKFLOW-GUIDE.md` (deploying
 > code/infra changes to QA), `docs/api/INDEX.md` (the target domain map this
 > platform is being built against).
-> **Last updated:** 2026-07-23.
+> **Last updated:** 2026-07-23 (fixed a UTF-8 BOM bug in `generate-qa-jwt.ps1`/`generate-ts-client.ps1` breaking Windows PowerShell 5.1).
 
 ---
 
@@ -68,6 +68,17 @@ than trying to mint your own.
 # Run by whoever has Key Vault access, not by the remote tester:
 .\scripts\generate-qa-jwt.ps1 -Permissions "resource.read,resource.write,reservation.create,reservation.read" -ExpiryHours 48
 ```
+
+Call it with the leading `.\` — PowerShell doesn't run scripts from the current
+directory by default, so a bare `generate-qa-jwt.ps1` fails with
+`CommandNotFoundException`. On **Windows PowerShell 5.1** specifically (this
+platform's usual default shell — see below), the script file must carry a
+UTF-8 BOM or 5.1 misreads its em-dash characters using the system ANSI
+codepage instead of UTF-8, corrupting string literals and producing confusing
+`ParserError`/`Unexpected token` errors around unrelated-looking lines. Both
+`generate-qa-jwt.ps1` and `generate-ts-client.ps1` carry the BOM as of
+2026-07-23 — if you ever add a script under `scripts/` with non-ASCII
+characters (em-dashes, curly quotes), save it with a UTF-8 BOM too.
 
 Two things every token bakes in that shape what you'll see:
 
@@ -899,6 +910,8 @@ reservation.create, reservation.confirm`.
 | `400 VALIDATION_FAILED` mentioning `Idempotency-Key` | That header is required on Work service create/mutate endpoints (see per-section tables) | Add `"Idempotency-Key" = [guid]::NewGuid().ToString()` to the headers |
 | `409 IDEMPOTENCY_CONFLICT` | Same `Idempotency-Key` reused with a different body | Use a fresh GUID per distinct request |
 | `412 Precondition Failed` / `VERSION_CONFLICT` | Optimistic-concurrency mismatch (`expectedVersion` stale) | `GET` the current version first, retry with the current value |
+| `generate-qa-jwt.ps1 : The term ... is not recognized` | PowerShell doesn't run scripts from the current directory by default | Call it as `.\generate-qa-jwt.ps1 ...` |
+| `ParserError`/`Unexpected token` running `generate-qa-jwt.ps1` on Windows PowerShell 5.1, pointing at lines with no obvious syntax error | The script's em-dash characters were saved as UTF-8 without a BOM; PS 5.1 misreads them via the system ANSI codepage instead of UTF-8, corrupting nearby string literals | Fixed 2026-07-23 — the script now carries a UTF-8 BOM. If you see this on a different script, re-save it with a UTF-8 BOM |
 
 For deploying code changes that affect these endpoints, or diagnosing an
 actual outage rather than one of the above, see

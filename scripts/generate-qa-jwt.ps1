@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Mints a JWT for testing the QA Gateway, signed with the real QA HMAC key
     pulled live from Key Vault (eswmp-staging-kv) — never hardcode that key

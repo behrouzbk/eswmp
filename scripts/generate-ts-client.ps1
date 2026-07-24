@@ -1,4 +1,4 @@
-#Requires -Version 7.0
+﻿#Requires -Version 7.0
 <#
 .SYNOPSIS
     Generates TypeScript type definitions from all OpenAPI contracts using openapi-typescript.
